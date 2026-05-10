@@ -1,0 +1,40 @@
+# ── Arduino Bridge Configuration ─────────────────────────────
+# Copy to config.yaml and edit for your setup.
+
+serial:
+  port: auto               # auto-detect the Arduino serial port
+  baudrate: 9600
+  timeout: 1.0             # serial read timeout (seconds)
+  response_timeout: 2.0    # max wait for Arduino reply
+
+mqtt:
+  host: 165.232.139.240           # your MQTT broker IP
+  port: 1883
+  username: backend
+  password: backend
+  client_id: arduino-bridge
+  topic_prefix: arduino     # all topics start with this
+  qos: 1
+
+timers:
+  persist_file: timers.json
+
+  # Default timers — created on first run.
+  # After that, manage via MQTT (arduino/timer/set, /delete).
+  defaults:
+    - id: dht_temp
+      command: "dht1:TEMP"
+      interval_s: 30
+      enabled: true
+      publish_to: arduino/sensor/temperature
+      parse: float
+
+    - id: dht_hum
+      command: "dht1:HUM"
+      interval_s: 30
+      enabled: true
+      publish_to: arduino/sensor/humidity
+      parse: float
+
+logging:
+  level: DEBUG              # DEBUG for troubleshooting

@@ -1,0 +1,21 @@
+[Unit]
+Description=Arduino Bridge Service (Serial ↔ MQTT)
+After=network-online.target mosquitto.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/arduino-bridge
+ExecStart=/usr/bin/python3 -m service --config service/config.yaml
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Environment overrides (uncomment to use instead of config.yaml)
+# Environment=ARDUINO_SERIAL_PORT=/dev/ttyACM0
+# Environment=ARDUINO_MQTT_HOST=192.168.1.100
+
+[Install]
+WantedBy=multi-user.target
