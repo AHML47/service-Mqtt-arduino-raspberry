@@ -37,7 +37,7 @@ jobs:
 
       - name: Extract binary
         run: |
-          docker cp extract:/app/build/service.dist/service.bin ./service.bin
+          docker cp extract:/app/build/__main__.dist/service.bin ./service.bin
 
       - name: Cleanup container
         run: |
