@@ -9,13 +9,18 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
+# Make sure compiler invocations are cached via ccache symlinks (gcc/g++ wrappers)
+ENV PATH="/usr/lib/ccache:${PATH}"
+
 RUN pip install --no-cache-dir "nuitka[onefile]"
 
 WORKDIR /app
 
-COPY . /app
-
+# Install Python deps first for better Docker layer caching
+COPY requirements.txt /app/requirements.txt
 RUN if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; fi
+
+COPY service /app/service
 
 RUN python -m nuitka service/__main__.py \
     --standalone \
@@ -23,6 +28,7 @@ RUN python -m nuitka service/__main__.py \
     --include-package=service \
     --include-data-files=service/config.yaml=service/config.yaml \
     --assume-yes-for-downloads \
+    --jobs=$(nproc) \
     --output-dir=/app/build \
     --output-filename=service.bin
 

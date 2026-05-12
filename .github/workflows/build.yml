@@ -15,6 +15,8 @@ jobs:
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -24,6 +26,8 @@ jobs:
           docker buildx build \
             --platform linux/arm64 \
             -t service-builder \
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
             --load \
             .
 
