@@ -47,12 +47,16 @@ class MQTTClient:
         topic_prefix: str = "arduino",
         qos: int = 1,
         keepalive: int = 60,
+        connect_timeout: int = 30,
+        connect_retries: int = 1,
     ):
         self._host = host
         self._port = port
         self._prefix = topic_prefix
         self._qos = qos
         self._keepalive = keepalive
+        self._connect_timeout = connect_timeout
+        self._connect_retries = connect_retries
 
         self._client = mqtt.Client(
             client_id=client_id,
@@ -72,6 +76,9 @@ class MQTTClient:
         self._client.on_connect = self._on_connect
         self._client.on_message = self._on_message
 
+        # Connection state
+        self._connected = False
+
         # External callbacks — set by the service
         self.on_command: Optional[CommandCallback] = None
         self.on_timer_set: Optional[TimerSetCallback] = None
@@ -82,8 +89,41 @@ class MQTTClient:
 
     def start(self):
         logger.info("Connecting to MQTT broker %s:%d ...", self._host, self._port)
-        self._client.connect(self._host, self._port, self._keepalive)
-        self._client.loop_start()
+
+        attempt = 0
+        while attempt < max(1, self._connect_retries):
+            attempt += 1
+            try:
+                self._client.connect(self._host, self._port, self._keepalive)
+                self._client.loop_start()
+
+                # Wait for on_connect to set the flag
+                waited = 0.0
+                interval = 0.1
+                timeout = float(self._connect_timeout)
+                while waited < timeout:
+                    if self._connected:
+                        return
+                    time.sleep(interval)
+                    waited += interval
+
+                logger.warning(
+                    "Timeout waiting for MQTT connection (%.1fs) on attempt %d/%d",
+                    timeout,
+                    attempt,
+                    self._connect_retries,
+                )
+                # If not connected, stop loop and retry (if retries left)
+                try:
+                    self._client.loop_stop()
+                    self._client.disconnect()
+                except Exception:
+                    pass
+
+            except Exception as e:
+                logger.exception("MQTT connect attempt %d failed: %s", attempt, e)
+
+        logger.error("Failed to connect to MQTT broker after %d attempts", self._connect_retries)
 
     def stop(self):
         self.publish("status", {"state": "offline"}, retain=True)
@@ -120,6 +160,7 @@ class MQTTClient:
     def _on_connect(self, client, userdata, flags, rc, properties=None):
         if rc == 0:
             logger.info("MQTT connected")
+            self._connected = True
             # Subscribe to control topics
             subs = [
                 f"{self._prefix}/cmd",
@@ -134,6 +175,7 @@ class MQTTClient:
             self.publish("status", {"state": "online"}, retain=True)
         else:
             logger.error("MQTT connect failed, rc=%d", rc)
+            self._connected = False
 
     def _on_message(self, client, userdata, msg):
         topic = msg.topic

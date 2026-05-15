@@ -5,8 +5,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=pi
-WorkingDirectory=/home/pi/arduino-bridge
+User=ahml47
+WorkingDirectory=/home/ahml47/arduino-bridge
 ExecStart=/usr/bin/python3 -m service --config service/config.yaml
 Restart=always
 RestartSec=5

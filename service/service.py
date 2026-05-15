@@ -62,6 +62,8 @@ class ArduinoBridgeService:
             topic_prefix=mcfg.get("topic_prefix", "arduino"),
             qos=mcfg.get("qos", 1),
             keepalive=mcfg.get("keepalive", 60),
+            connect_timeout=mcfg.get("connect_timeout", 30),
+            connect_retries=mcfg.get("connect_retries", 1),
         )
         self._mqtt.on_command = self._handle_mqtt_command
         self._mqtt.on_timer_set = self._handle_timer_set

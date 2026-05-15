@@ -10,7 +10,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="${PROJECT_DIR:-${SCRIPT_DIR}}"
 VENV_DIR="${VENV_DIR:-${PROJECT_DIR}/.venv}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
-RUN_USER="${RUN_USER:-pi}"
+RUN_USER="${RUN_USER:-ahml47}"
 CONFIG_FILE="${CONFIG_FILE:-${PROJECT_DIR}/service/config.yaml}"
 
 # Determine whether we can write the configured service file and call systemctl

@@ -61,8 +61,10 @@ DEFAULT_CONFIG = {
         "password": "backend",
         "client_id": "arduino-bridge",
         "topic_prefix": "arduino",
+        "connect_timeout": 30,
+        "connect_retries": 10,
         "qos": 1,
-        "keepalive": 60,
+        "keepalive": 6000,
     },
     "timers": {
         "persist_file": "timers.json",
