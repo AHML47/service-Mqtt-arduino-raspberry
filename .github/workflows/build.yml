@@ -195,7 +195,7 @@ jobs:
         run: |
           aws s3 cp dist/${{ vars.APP_NAME }} \
             s3://${{ vars.DO_SPACES_BUCKET }}/releases/${{ github.ref_name }}/${{ vars.APP_NAME }} \
-            --endpoint-url https://{{ vars.DO_SPACES_BUCKET }}.${{ vars.DO_SPACES_REGION }}.digitaloceanspaces.com
+            --endpoint-url https://${{ vars.DO_SPACES_BUCKET }}.${{ vars.DO_SPACES_REGION }}.digitaloceanspaces.com
       - name: Print uploaded location
         run: |
           echo "Uploaded release prefix: ota/${GITHUB_REF_NAME}/${GITHUB_SHA}"
