@@ -125,7 +125,7 @@ class ArduinoBridgeService:
         self._mqtt.publish("resp", {
             "cmd": command,
             "resp": response,
-            "ts": _now_iso(),
+            "time": _now_iso(),
         })
 
     # ── Arduino → MQTT (unsolicited push) ────────────────────
@@ -137,7 +137,7 @@ class ArduinoBridgeService:
         """
         self._mqtt.publish(f"push/{device}", {
             "value": payload,
-            "ts": _now_iso(),
+            "time": _now_iso(),
         })
 
         # Special handling for DHT pushes → split into temp/humidity topics
@@ -175,7 +175,7 @@ class ArduinoBridgeService:
             "cmd": command,
             "resp": response,
             "value": value,
-            "ts": _now_iso(),
+            "time": _now_iso(),
         }
 
         if publish_to:
@@ -205,13 +205,13 @@ class ArduinoBridgeService:
             self._mqtt.publish("timer/status", {
                 "action": "set",
                 "timer": entry.to_dict(),
-                "ts": _now_iso(),
+                "time": _now_iso(),
             })
         except (KeyError, TypeError) as e:
             logger.error("Invalid timer payload: %s — %s", data, e)
             self._mqtt.publish("timer/status", {
                 "error": f"invalid payload: {e}",
-                "ts": _now_iso(),
+                "time": _now_iso(),
             })
 
     def _handle_timer_delete(self, timer_id: str):
@@ -221,7 +221,7 @@ class ArduinoBridgeService:
             "action": "delete",
             "id": timer_id,
             "success": success,
-            "ts": _now_iso(),
+            "time": _now_iso(),
         })
 
     def _handle_timer_list(self):
@@ -230,7 +230,7 @@ class ArduinoBridgeService:
         self._mqtt.publish("timer/status", {
             "action": "list",
             "timers": timers,
-            "ts": _now_iso(),
+            "time": _now_iso(),
         })
 
 

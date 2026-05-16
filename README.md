@@ -30,10 +30,10 @@ MQTT Broker
 | Topic                          | Dir | Payload                          | Description                    |
 |--------------------------------|-----|----------------------------------|--------------------------------|
 | `arduino/cmd`                  | IN  | `device:action:param1:param2`    | Send raw command to Arduino    |
-| `arduino/resp`                 | OUT | `{"cmd":"...","resp":"...","ts"}` | Command response               |
-| `arduino/push/{device}`        | OUT | `{"value":"...","ts":"..."}`     | Unsolicited Arduino push data  |
-| `arduino/sensor/temperature`   | OUT | `{"value":24.5,"ts":"..."}`      | Parsed temperature reading     |
-| `arduino/sensor/humidity`      | OUT | `{"value":55.0,"ts":"..."}`      | Parsed humidity reading        |
+| `arduino/resp`                 | OUT | `{"cmd":"...","resp":"...","time"}` | Command response               |
+| `arduino/push/{device}`        | OUT | `{"value":"...","time"}`     | Unsolicited Arduino push data  |
+| `arduino/sensor/temperature`   | OUT | `{"value":24.5,"time"}`      | Parsed temperature reading     |
+| `arduino/sensor/humidity`      | OUT | `{"value":55.0,"time"}`      | Parsed humidity reading        |
 | `arduino/timer/set`            | IN  | JSON (see below)                 | Create / update a timer        |
 | `arduino/timer/delete`         | IN  | `{"id":"timer_id"}`              | Delete a timer                 |
 | `arduino/timer/list`           | IN  | _(empty)_                        | Request timer list              |

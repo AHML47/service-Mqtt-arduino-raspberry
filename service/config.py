@@ -129,7 +129,7 @@ def load_config(path: str = "config.yaml") -> dict:
 
     # Load environment variables from an env file if present (useful for systemd
     # EnvironmentFile-style setups). Check common locations; ignore parse errors.
-    for env_file in ("/envirment/env", "/environment/env"):
+    for env_file in ("/etc/environment", "/etc/environment"):
         if os.path.isfile(env_file):
             try:
                 with open(env_file) as ef:

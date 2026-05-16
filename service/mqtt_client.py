@@ -7,6 +7,7 @@ import json
 import logging
 import time
 from typing import Callable, Optional
+from datetime import datetime, timezone
 
 import paho.mqtt.client as mqtt
 
@@ -140,7 +141,11 @@ class MQTTClient:
         """
         topic = f"{self._prefix}/{subtopic}"
         if isinstance(payload, dict):
-            data = json.dumps(payload)
+            # Copy to avoid mutating caller dict and ensure `time` is present
+            p = payload.copy()
+            if "time" not in p:
+                p["time"] = datetime.now(timezone.utc).isoformat()
+            data = json.dumps(p)
         else:
             data = str(payload)
         self._client.publish(topic, data, qos=self._qos, retain=retain)
@@ -149,7 +154,10 @@ class MQTTClient:
     def publish_raw(self, topic: str, payload, retain: bool = False):
         """Publish to an absolute topic (for custom timer publish_to)."""
         if isinstance(payload, dict):
-            data = json.dumps(payload)
+            p = payload.copy()
+            if "time" not in p:
+                p["time"] = datetime.now(timezone.utc).isoformat()
+            data = json.dumps(p)
         else:
             data = str(payload)
         self._client.publish(topic, data, qos=self._qos, retain=retain)
