@@ -144,13 +144,13 @@ class ArduinoBridgeService:
         if device.startswith("dht"):
             parsed = parse_dht_push(payload)
             if parsed:
-                self._mqtt.publish("sensor/temperature", {
-                    "value": parsed["temperature"],
-                    "ts": _now_iso(),
+                # Publish sensor data under the unified `sensorData` topic as
+                # { "sensor name": value } per requested format.
+                self._mqtt.publish("sensorData", {
+                    "temperature": parsed["temperature"],
                 })
-                self._mqtt.publish("sensor/humidity", {
-                    "value": parsed["humidity"],
-                    "ts": _now_iso(),
+                self._mqtt.publish("sensorData", {
+                    "humidity": parsed["humidity"],
                 })
 
     # ── Timer fire → Arduino → MQTT ─────────────────────────
@@ -179,7 +179,19 @@ class ArduinoBridgeService:
         }
 
         if publish_to:
-            self._mqtt.publish_raw(publish_to, result_payload)
+            # Normalize publish_to so it uses the current MQTT prefix.
+            topic = publish_to
+            prefix = self._mqtt._prefix
+            if topic.startswith(prefix + "/"):
+                final_topic = topic
+            elif topic.startswith("arduino/"):
+                # Replace legacy 'arduino' prefix with the current prefix
+                final_topic = prefix + topic[len("arduino"):]
+            else:
+                # Treat as relative and prefix it
+                final_topic = f"{prefix}/{topic.lstrip('/') }"
+
+            self._mqtt.publish_raw(final_topic, result_payload)
         else:
             self._mqtt.publish("resp", result_payload)
 

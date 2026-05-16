@@ -127,6 +127,27 @@ def load_config(path: str = "config.yaml") -> dict:
         except Exception as e:
             logger.warning("Failed to read %s: %s — using defaults", path, e)
 
+    # Load environment variables from an env file if present (useful for systemd
+    # EnvironmentFile-style setups). Check common locations; ignore parse errors.
+    for env_file in ("/envirment/env", "/environment/env"):
+        if os.path.isfile(env_file):
+            try:
+                with open(env_file) as ef:
+                    for line in ef:
+                        line = line.strip()
+                        if not line or line.startswith("#"):
+                            continue
+                        if "=" in line:
+                            k, v = line.split("=", 1)
+                            k = k.strip()
+                            v = v.strip().strip("'\"")
+                            # Do not overwrite existing environment variables
+                            os.environ.setdefault(k, v)
+                logger.info("Loaded environment variables from %s", env_file)
+                break
+            except Exception as e:
+                logger.warning("Failed to load env file %s: %s", env_file, e)
+
     # Environment overrides
     env_map = {
         "ARDUINO_SERIAL_PORT":  ("serial", "port"),
@@ -143,6 +164,17 @@ def load_config(path: str = "config.yaml") -> dict:
             section, key = spec[0], spec[1]
             cast = spec[2] if len(spec) > 2 else str
             config[section][key] = cast(val)
+
+    # If a connection string is provided as an environment variable, use the
+    # requested topic format: `hydroponic/{connectionString}` as the MQTT prefix.
+    # Accept a few common env var names for compatibility.
+    conn = (
+        os.environ.get("CONNECTION_STRING")
+        or os.environ.get("ARDUINO_CONNECTION_STRING")
+        or os.environ.get("HYDROPONIC_CONNECTION")
+    )
+    if conn:
+        config["mqtt"]["topic_prefix"] = f"hydroponic/{conn}"
 
     # Auto-detect the Arduino serial port when not explicitly configured.
     port = config.get("serial", {}).get("port")
