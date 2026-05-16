@@ -177,9 +177,9 @@ jobs:
         with:
           name: ${{ env.DIST_NAME }}-arm64
           path: |
-            dist/${{ env.DIST_NAME }}
-            dist/${{ env.DIST_NAME }}.sha256
-            dist/release.json
+            /workspace/dist/${{ env.DIST_NAME }}
+            /workspace/dist/${{ env.DIST_NAME }}.sha256
+            /workspace/dist/release.json
       
       - name: Install AWS CLI
         run: |
@@ -193,7 +193,7 @@ jobs:
       
       - name: Upload Artifact to DigitalOcean Spaces
         run: |
-          aws s3 cp dist/${{ vars.APP_NAME }} \
+          aws s3 cp /workspace/dist/${{ vars.APP_NAME }} \
             s3://${{ vars.DO_SPACES_BUCKET }}/releases/${{ github.ref_name }}/${{ vars.APP_NAME }} \
             --endpoint-url https://${{ vars.DO_SPACES_BUCKET }}.${{ vars.DO_SPACES_REGION }}.digitaloceanspaces.com
       - name: Print uploaded location
