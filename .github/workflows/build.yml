@@ -14,7 +14,7 @@ on:
 
 env:
   PYTHON_VERSION: "3.11"
-  APP_ENTRYPOINT: "src/main.py"
+  APP_ENTRYPOINT: "service/__main__.py"
   DIST_NAME: "ota-service"
 
 jobs:
