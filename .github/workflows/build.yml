@@ -180,33 +180,22 @@ jobs:
             dist/${{ env.DIST_NAME }}
             dist/${{ env.DIST_NAME }}.sha256
             dist/release.json
-
-      - name: Configure AWS credentials for DigitalOcean Spaces
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.DO_SPACES_KEY }}
-          aws-secret-access-key: ${{ secrets.DO_SPACES_SECRET }}
-          aws-region: ${{ secrets.DO_SPACES_REGION }}
-
-      - name: Upload executable to DigitalOcean Spaces
-        env:
-          DO_SPACES_BUCKET: ${{ secrets.DO_SPACES_BUCKET }}
-          DO_SPACES_REGION: ${{ secrets.DO_SPACES_REGION }}
-          DO_SPACES_ENDPOINT: https://${{ secrets.DO_SPACES_REGION }}.digitaloceanspaces.com
-          RELEASE_PREFIX: ota/${{ github.ref_name }}/${{ github.sha }}
+      
+      - name: Install AWS CLI
         run: |
-          aws s3 cp "dist/${DIST_NAME}" \
-            "s3://${DO_SPACES_BUCKET}/${RELEASE_PREFIX}/${DIST_NAME}" \
-            --endpoint-url "${DO_SPACES_ENDPOINT}"
-
-          aws s3 cp "dist/${DIST_NAME}.sha256" \
-            "s3://${DO_SPACES_BUCKET}/${RELEASE_PREFIX}/${DIST_NAME}.sha256" \
-            --endpoint-url "${DO_SPACES_ENDPOINT}"
-
-          aws s3 cp "dist/release.json" \
-            "s3://${DO_SPACES_BUCKET}/${RELEASE_PREFIX}/release.json" \
-            --endpoint-url "${DO_SPACES_ENDPOINT}"
-
+          pip install awscli
+      
+      - name: Configure DigitalOcean Spaces
+        run: |
+          aws configure set aws_access_key_id "${{ secrets.DO_SPACES_KEY }}"
+          aws configure set aws_secret_access_key "${{ secrets.DO_SPACES_SECRET }}"
+          aws configure set default.region "${{ vars.DO_SPACES_REGION }}"
+      
+      - name: Upload Artifact to DigitalOcean Spaces
+        run: |
+          aws s3 cp dist/${{ vars.APP_NAME }} \
+            s3://${{ vars.DO_SPACES_BUCKET }}/releases/${{ github.ref_name }}/${{ vars.APP_NAME }} \
+            --endpoint-url https://{{ vars.DO_SPACES_BUCKET }}.${{ vars.DO_SPACES_REGION }}.digitaloceanspaces.com
       - name: Print uploaded location
         run: |
           echo "Uploaded release prefix: ota/${GITHUB_REF_NAME}/${GITHUB_SHA}"
