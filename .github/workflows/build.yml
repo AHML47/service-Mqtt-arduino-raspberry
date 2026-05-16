@@ -1,13 +1,70 @@
-name: Build Raspberry Pi Service fix
+name: Build, Test, and Deploy Raspberry Pi OTA Binary
 
 on:
   push:
     branches:
       - main
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      release_name:
+        description: "Optional release name or version (example: v1.2.0)"
+        required: false
+        default: ""
+
+env:
+  PYTHON_VERSION: "3.11"
+  APP_ENTRYPOINT: "src/main.py"
+  DIST_NAME: "ota-service"
 
 jobs:
-  build-arm:
+  test:
+    name: Test on Ubuntu
     runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Syntax check
+        run: |
+          python -m compileall -q .
+
+      - name: Run tests
+        run: |
+          if [ -d tests ]; then
+            pytest -q
+          else
+            echo "No tests/ directory found; skipping pytest."
+          fi
+
+  build-and-deploy:
+    name: Build ARM64 executable and deploy to DigitalOcean Spaces
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout repository
@@ -21,32 +78,135 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build Docker image
+      - name: Create ARM64 build container definition
+        run: |
+          cat > Dockerfile.ota <<'EOF'
+          FROM --platform=linux/arm64 python:3.11-slim-bookworm
+
+          ENV PYTHONDONTWRITEBYTECODE=1 \
+              PYTHONUNBUFFERED=1 \
+              PIP_NO_CACHE_DIR=1
+
+          WORKDIR /workspace
+
+          RUN apt-get update && apt-get install -y --no-install-recommends \
+              build-essential \
+              gcc \
+              git \
+              patchelf \
+              && rm -rf /var/lib/apt/lists/*
+
+          COPY requirements.txt /workspace/requirements.txt
+
+          RUN python -m pip install --upgrade pip \
+              && pip install -r requirements.txt \
+              && pip install pyinstaller pytest
+
+          COPY . /workspace
+          EOF
+
+      - name: Build ARM64 builder image
         run: |
           docker buildx build \
             --platform linux/arm64 \
-            -t service-builder \
-            --cache-from type=gha \
-            --cache-to type=gha,mode=max \
+            -f Dockerfile.ota \
+            -t ota-builder:latest \
             --load \
             .
 
-      - name: Create container
+      - name: Build executable and run checks inside ARM64 container
         run: |
-          docker create --name extract service-builder
+          mkdir -p dist
+          docker run --rm \
+            --platform linux/arm64 \
+            -e APP_ENTRYPOINT="${APP_ENTRYPOINT}" \
+            -e DIST_NAME="${DIST_NAME}" \
+            -e GITHUB_SHA="${GITHUB_SHA}" \
+            -e GITHUB_REF_NAME="${GITHUB_REF_NAME}" \
+            -e RELEASE_NAME="${{ inputs.release_name }}" \
+            -v "${PWD}:/workspace" \
+            -w /workspace \
+            ota-builder:latest \
+            bash -lc '
+              set -euo pipefail
 
-      - name: Extract binary
-        run: |
-          docker cp extract:/app/build/__main__.dist/service.bin ./service.bin
+              python -m compileall -q .
 
-      - name: Cleanup container
-        run: |
-          docker rm extract
+              if [ -d tests ]; then
+                pytest -q
+              fi
 
-      - name: Upload artifact
+              if [ ! -f "${APP_ENTRYPOINT}" ] && [ ! -f "app.py" ] && [ ! -f "main.py" ]; then
+                echo "Could not find an entrypoint. Set APP_ENTRYPOINT in the workflow."
+                exit 1
+              fi
+
+              ENTRYPOINT="${APP_ENTRYPOINT}"
+              if [ ! -f "${ENTRYPOINT}" ]; then
+                if [ -f "app.py" ]; then
+                  ENTRYPOINT="app.py"
+                elif [ -f "main.py" ]; then
+                  ENTRYPOINT="main.py"
+                fi
+              fi
+
+              rm -rf build dist
+              pyinstaller --noconfirm --onefile --name "${DIST_NAME}" "${ENTRYPOINT}"
+
+              sha256sum "dist/${DIST_NAME}" > "dist/${DIST_NAME}.sha256"
+
+              VERSION="${RELEASE_NAME}"
+              if [ -z "${VERSION}" ]; then
+                VERSION="${GITHUB_REF_NAME:-${GITHUB_SHA}}"
+              fi
+
+              cat > "dist/release.json" <<JSON
+              {
+                "name": "${DIST_NAME}",
+                "version": "${VERSION}",
+                "git_sha": "${GITHUB_SHA}",
+                "ref_name": "${GITHUB_REF_NAME}",
+                "platform": "linux/arm64",
+                "built_at_utc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              }
+              JSON
+            '
+
+      - name: Upload local workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: service-bin
-          path: service.bin
+          name: ${{ env.DIST_NAME }}-arm64
+          path: |
+            dist/${{ env.DIST_NAME }}
+            dist/${{ env.DIST_NAME }}.sha256
+            dist/release.json
 
+      - name: Configure AWS credentials for DigitalOcean Spaces
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.DO_SPACES_KEY }}
+          aws-secret-access-key: ${{ secrets.DO_SPACES_SECRET }}
+          aws-region: ${{ secrets.DO_SPACES_REGION }}
 
+      - name: Upload executable to DigitalOcean Spaces
+        env:
+          DO_SPACES_BUCKET: ${{ secrets.DO_SPACES_BUCKET }}
+          DO_SPACES_REGION: ${{ secrets.DO_SPACES_REGION }}
+          DO_SPACES_ENDPOINT: https://${{ secrets.DO_SPACES_REGION }}.digitaloceanspaces.com
+          RELEASE_PREFIX: ota/${{ github.ref_name }}/${{ github.sha }}
+        run: |
+          aws s3 cp "dist/${DIST_NAME}" \
+            "s3://${DO_SPACES_BUCKET}/${RELEASE_PREFIX}/${DIST_NAME}" \
+            --endpoint-url "${DO_SPACES_ENDPOINT}"
+
+          aws s3 cp "dist/${DIST_NAME}.sha256" \
+            "s3://${DO_SPACES_BUCKET}/${RELEASE_PREFIX}/${DIST_NAME}.sha256" \
+            --endpoint-url "${DO_SPACES_ENDPOINT}"
+
+          aws s3 cp "dist/release.json" \
+            "s3://${DO_SPACES_BUCKET}/${RELEASE_PREFIX}/release.json" \
+            --endpoint-url "${DO_SPACES_ENDPOINT}"
+
+      - name: Print uploaded location
+        run: |
+          echo "Uploaded release prefix: ota/${GITHUB_REF_NAME}/${GITHUB_SHA}"
