@@ -1,4 +1,4 @@
-name: Build Raspberry Pi Service
+name: Build Raspberry Pi Service fix
 
 on:
   push:
@@ -48,3 +48,5 @@ jobs:
         with:
           name: service-bin
           path: service.bin
+
+
