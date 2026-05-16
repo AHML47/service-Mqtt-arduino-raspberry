@@ -129,7 +129,8 @@ def load_config(path: str = "config.yaml") -> dict:
 
     # Load environment variables from an env file if present (useful for systemd
     # EnvironmentFile-style setups). Check common locations; ignore parse errors.
-    for env_file in ("/etc/environment", "/etc/environment"):
+    env_file_values = {}
+    for env_file in ("/etc/environment",):
         if os.path.isfile(env_file):
             try:
                 with open(env_file) as ef:
@@ -139,10 +140,7 @@ def load_config(path: str = "config.yaml") -> dict:
                             continue
                         if "=" in line:
                             k, v = line.split("=", 1)
-                            k = k.strip()
-                            v = v.strip().strip("'\"")
-                            # Do not overwrite existing environment variables
-                            os.environ.setdefault(k, v)
+                            env_file_values[k.strip()] = v.strip().strip("'\"")
                 logger.info("Loaded environment variables from %s", env_file)
                 break
             except Exception as e:
@@ -159,7 +157,7 @@ def load_config(path: str = "config.yaml") -> dict:
         "ARDUINO_LOG_LEVEL":    ("logging", "level"),
     }
     for env_key, spec in env_map.items():
-        val = os.environ.get(env_key)
+        val = env_file_values.get(env_key, os.environ.get(env_key))
         if val is not None:
             section, key = spec[0], spec[1]
             cast = spec[2] if len(spec) > 2 else str
@@ -169,7 +167,10 @@ def load_config(path: str = "config.yaml") -> dict:
     # requested topic format: `hydroponic/{connectionString}` as the MQTT prefix.
     # Accept a few common env var names for compatibility.
     conn = (
-        os.environ.get("CONNECTION_STRING")
+        env_file_values.get("CONNECTION_STRING")
+        or env_file_values.get("ARDUINO_CONNECTION_STRING")
+        or env_file_values.get("HYDROPONIC_CONNECTION")
+        or os.environ.get("CONNECTION_STRING")
         or os.environ.get("ARDUINO_CONNECTION_STRING")
         or os.environ.get("HYDROPONIC_CONNECTION")
     )
