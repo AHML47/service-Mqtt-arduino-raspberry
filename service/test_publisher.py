@@ -34,7 +34,7 @@ def publish_example(sensor: str, value: Any, count: int, interval: float, retain
         client.username_pw_set(mcfg.get("username"), mcfg.get("password"))
 
     host = mcfg.get("host", "localhost")
-    port = int(mcfg.get("port", 1883))
+    port = int(mcfg.get("port", 1885))
 
     logger.info("Connecting to MQTT %s:%s (topic=%s)", host, port, topic)
     client.connect(host, port)

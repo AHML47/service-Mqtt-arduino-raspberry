@@ -53,6 +53,7 @@ class SerialConnection:
 
         self._reader_thread: Optional[threading.Thread] = None
         self._running = False
+        self._fake_mode = False
 
         # External callback for unsolicited push lines
         self.on_push: Optional[PushCallback] = None
@@ -62,6 +63,14 @@ class SerialConnection:
     def start(self):
         """Open serial port and start the background reader."""
         self._connect()
+        if not self.is_connected:
+            self._fake_mode = True
+            logger.warning(
+                "Serial unavailable on %s; continuing in fake-data mode",
+                self._port,
+            )
+            return
+
         self._running = True
         self._reader_thread = threading.Thread(
             target=self._reader_loop, daemon=True, name="serial-reader"
@@ -79,7 +88,7 @@ class SerialConnection:
 
     @property
     def is_connected(self) -> bool:
-        return self._ser is not None and self._ser.is_open
+        return (self._ser is not None and self._ser.is_open) or self._fake_mode
 
     # ── Public API ───────────────────────────────────────────
 
@@ -96,6 +105,11 @@ class SerialConnection:
         Thread-safe — only one send() at a time.
         """
         with self._lock:
+            if self._fake_mode:
+                fake = self._fake_response(command)
+                logger.warning("Fake serial response for %s → %s", command, fake)
+                return fake
+
             if not self.is_connected:
                 return "ERR:not_connected"
 
@@ -214,6 +228,23 @@ class SerialConnection:
 
     def _reconnect_wait(self):
         """Try reconnecting every 5 seconds."""
+        if self._fake_mode:
+            return
         logger.info("Attempting serial reconnect in 5s...")
         time.sleep(5)
         self._connect()
+
+    def _fake_response(self, command: str) -> str:
+        normalized = command.strip().lower()
+
+        if "temp" in normalized:
+            return "OK:24.5"
+        if "hum" in normalized:
+            return "OK:55.0"
+        if "dht" in normalized and ("read" in normalized or ":" in normalized):
+            return "OK:24.5:55.0"
+        if "read" in normalized:
+            return "OK:1"
+
+        checksum = sum(ord(ch) for ch in command) % 1000
+        return f"OK:FAKE:{checksum}"

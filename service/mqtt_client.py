@@ -6,8 +6,8 @@ and publishes sensor data / responses.
 import json
 import logging
 import time
-from typing import Callable, Optional
 from datetime import datetime, timezone
+from typing import Callable, Optional
 
 import paho.mqtt.client as mqtt
 
@@ -18,6 +18,7 @@ CommandCallback = Callable[[str], None]             # raw Arduino command string
 TimerSetCallback = Callable[[dict], None]            # timer JSON payload
 TimerDeleteCallback = Callable[[str], None]          # timer id
 TimerListCallback = Callable[[], None]               # no args
+CaptureOrderCallback = Callable[[dict], None]        # capture order JSON payload
 
 
 class MQTTClient:
@@ -26,6 +27,7 @@ class MQTTClient:
 
     Subscriptions (relative to prefix):
         {prefix}/cmd          → forward to Arduino
+        {prefix}/captureorder → schedule a photo capture
         {prefix}/timer/set    → create/update timer
         {prefix}/timer/delete → delete timer
         {prefix}/timer/list   → request timer list
@@ -35,13 +37,14 @@ class MQTTClient:
         {prefix}/push/{dev}   → unsolicited Arduino pushes
         {prefix}/sensor/*     → parsed sensor values
         {prefix}/timer/status → timer list dump
+        {prefix}/photo        → captured JPEG bytes
         {prefix}/status       → online / offline (LWT)
     """
 
     def __init__(
         self,
         host: str = "165.232.139.240",
-        port: int = 1883,
+        port: int = 1885,
         username: Optional[str] = None,
         password: Optional[str] = None,
         client_id: str = "arduino-bridge",
@@ -85,6 +88,7 @@ class MQTTClient:
         self.on_timer_set: Optional[TimerSetCallback] = None
         self.on_timer_delete: Optional[TimerDeleteCallback] = None
         self.on_timer_list: Optional[TimerListCallback] = None
+        self.on_capture_order: Optional[CaptureOrderCallback] = None
 
     # ── Lifecycle ────────────────────────────────────────────
 
@@ -137,7 +141,7 @@ class MQTTClient:
     def publish(self, subtopic: str, payload, retain: bool = False):
         """
         Publish to {prefix}/{subtopic}.
-        payload can be a dict (→ JSON) or a string.
+        payload can be a dict (→ JSON), bytes, or a string.
         """
         topic = f"{self._prefix}/{subtopic}"
         if isinstance(payload, dict):
@@ -146,10 +150,12 @@ class MQTTClient:
             if "time" not in p:
                 p["time"] = datetime.now(timezone.utc).isoformat()
             data = json.dumps(p)
+        elif isinstance(payload, (bytes, bytearray, memoryview)):
+            data = bytes(payload)
         else:
             data = str(payload)
         self._client.publish(topic, data, qos=self._qos, retain=retain)
-        logger.debug("PUB %s → %s", topic, data[:120])
+        self._log_publish(topic, data)
 
     def publish_raw(self, topic: str, payload, retain: bool = False):
         """Publish to an absolute topic (for custom timer publish_to)."""
@@ -158,10 +164,18 @@ class MQTTClient:
             if "time" not in p:
                 p["time"] = datetime.now(timezone.utc).isoformat()
             data = json.dumps(p)
+        elif isinstance(payload, (bytes, bytearray, memoryview)):
+            data = bytes(payload)
         else:
             data = str(payload)
         self._client.publish(topic, data, qos=self._qos, retain=retain)
-        logger.debug("PUB %s → %s", topic, data[:120])
+        self._log_publish(topic, data)
+
+    def _log_publish(self, topic: str, data):
+        if isinstance(data, (bytes, bytearray)):
+            logger.debug("PUB %s → <binary %d bytes>", topic, len(data))
+        else:
+            logger.debug("PUB %s → %s", topic, str(data)[:120])
 
     # ── MQTT callbacks ───────────────────────────────────────
 
@@ -172,6 +186,7 @@ class MQTTClient:
             # Subscribe to control topics
             subs = [
                 f"{self._prefix}/cmd",
+                f"{self._prefix}/captureorder",
                 f"{self._prefix}/timer/set",
                 f"{self._prefix}/timer/delete",
                 f"{self._prefix}/timer/list",
@@ -196,6 +211,11 @@ class MQTTClient:
             if suffix == "cmd":
                 if self.on_command:
                     self.on_command(payload)
+
+            elif suffix == "captureorder":
+                if self.on_capture_order:
+                    data = json.loads(payload)
+                    self.on_capture_order(data)
 
             elif suffix == "timer/set":
                 if self.on_timer_set:

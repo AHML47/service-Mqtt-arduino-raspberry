@@ -9,12 +9,18 @@ serial:
 
 mqtt:
   host: 165.232.139.240           # your MQTT broker IP
-  port: 1883
+  port: 1885
   username: backend
   password: backend
   client_id: arduino-bridge
   topic_prefix: arduino     # all topics start with this
   qos: 1
+
+photo:
+  output_dir: photos
+  resolution: [4608, 2592]
+  warmup_s: 2.0
+  autofocus: true
 
 timers:
   persist_file: timers.json
@@ -22,19 +28,7 @@ timers:
   # Default timers — created on first run.
   # After that, manage via MQTT (arduino/timer/set, /delete).
   defaults:
-    - id: dht_temp
-      command: "dht1:TEMP"
-      interval_s: 30
-      enabled: true
-      publish_to: arduino/sensor/temperature
-      parse: float
-
-    - id: dht_hum
-      command: "dht1:HUM"
-      interval_s: 30
-      enabled: true
-      publish_to: arduino/sensor/humidity
-      parse: float
+    
 
 logging:
   level: DEBUG              # DEBUG for troubleshooting

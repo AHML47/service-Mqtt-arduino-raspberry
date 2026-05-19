@@ -56,7 +56,7 @@ DEFAULT_CONFIG = {
     },
     "mqtt": {
         "host": "165.232.139.240",
-        "port": 1883,
+        "port": 1885,
         "username": "backend",
         "password": "backend",
         "client_id": "arduino-bridge",
@@ -66,8 +66,19 @@ DEFAULT_CONFIG = {
         "qos": 1,
         "keepalive": 6000,
     },
+    "photo": {
+        "output_dir": "photos",
+        "resolution": [4608, 2592],
+        "warmup_s": 2.0,
+        "autofocus": True,
+    },
     "timers": {
         "persist_file": "timers.json",
+        # Enable the timer subsystem. Set to False to disable timers entirely.
+        "enabled": True,
+        # Load the default timers on first run. Set to False to prevent
+        # creating the built-in timers (dht_temp / dht_hum).
+        "load_defaults": True,
         "defaults": [
             {
                 "id": "dht_temp",

@@ -21,9 +21,11 @@ Data flow:
 
 import logging
 import time
+import threading
 from datetime import datetime, timezone
 from typing import Optional
 
+from .photo_capture import PhotoCaptureError, PhotoCaptureService
 from .serial_conn import SerialConnection
 from .mqtt_client import MQTTClient
 from .timer_manager import TimerManager, TimerEntry
@@ -69,6 +71,7 @@ class ArduinoBridgeService:
         self._mqtt.on_timer_set = self._handle_timer_set
         self._mqtt.on_timer_delete = self._handle_timer_delete
         self._mqtt.on_timer_list = self._handle_timer_list
+        self._mqtt.on_capture_order = self._handle_capture_order
 
         # ── Timers ───────────────────────────────────────────
         tcfg = config.get("timers", {})
@@ -77,6 +80,23 @@ class ArduinoBridgeService:
         )
         self._timers.on_fire = self._handle_timer_fire
         self._timer_defaults = tcfg.get("defaults", [])
+        # Flags to control timer behavior (can be set in config.yaml)
+        self._timers_enabled = bool(tcfg.get("enabled", True))
+        self._timers_load_defaults = bool(tcfg.get("load_defaults", True))
+
+        # ── Camera ───────────────────────────────────────────
+        pcfg = config.get("photo", {})
+        resolution = pcfg.get("resolution", [4608, 2592])
+        self._photo_capture = PhotoCaptureService(
+            output_dir=pcfg.get("output_dir", "photos"),
+            resolution=(int(resolution[0]), int(resolution[1])),
+            warmup_s=float(pcfg.get("warmup_s", 2.0)),
+            autofocus=bool(pcfg.get("autofocus", True)),
+        )
+        self._photo_lock = threading.Lock()
+        # By default, automatically publish sensorData on unsolicited pushes.
+        # This will be disabled when a timer is created via MQTT.
+        self._auto_publish_sensor = True
 
     # ── Lifecycle ────────────────────────────────────────────
 
@@ -89,8 +109,15 @@ class ArduinoBridgeService:
         try:
             self._serial.start()
             self._mqtt.start()
-            self._timers.load_defaults(self._timer_defaults)
-            self._timers.start()
+            if self._timers_load_defaults:
+                self._timers.load_defaults(self._timer_defaults)
+            else:
+                logger.info("Timer defaults loading disabled by config")
+
+            if self._timers_enabled:
+                self._timers.start()
+            else:
+                logger.info("Timer subsystem disabled by config; timers will not run")
 
             self._running = True
             logger.info("Service is running. Press Ctrl+C to stop.")
@@ -107,7 +134,8 @@ class ArduinoBridgeService:
 
     def _shutdown(self):
         self._running = False
-        self._timers.stop()
+        if self._timers_enabled:
+            self._timers.stop()
         self._mqtt.stop()
         self._serial.stop()
         logger.info("Service stopped")
@@ -133,25 +161,21 @@ class ArduinoBridgeService:
     def _handle_push(self, device: str, payload: str):
         """
         Arduino sent an unsolicited line like "dht1:OK:24.5:55.0".
-        Parse it and publish to appropriate MQTT topics.
+        Parse it and publish `sensorData` messages (single-key JSON) when
+        automatic publishing is enabled. This mirrors the format used by
+        `service/test_publisher.py`.
         """
-        self._mqtt.publish(f"push/{device}", {
-            "value": payload,
-            "time": _now_iso(),
-        })
+        # Only publish sensorData when auto-publish is enabled
+        if not getattr(self, "_auto_publish_sensor", True):
+            return
 
-        # Special handling for DHT pushes → split into temp/humidity topics
+        # Special handling for DHT pushes → publish temperature and humidity
         if device.startswith("dht"):
             parsed = parse_dht_push(payload)
             if parsed:
-                # Publish sensor data under the unified `sensorData` topic as
-                # { "sensor name": value } per requested format.
-                self._mqtt.publish("sensorData", {
-                    "temperature": parsed["temperature"],
-                })
-                self._mqtt.publish("sensorData", {
-                    "humidity": parsed["humidity"],
-                })
+                # Publish separate messages following test_publisher.py format
+                self._mqtt.publish("sensorData", {"temperature": parsed["temperature"]})
+                self._mqtt.publish("sensorData", {"humidity": parsed["humidity"]})
 
     # ── Timer fire → Arduino → MQTT ─────────────────────────
 
@@ -202,6 +226,12 @@ class ArduinoBridgeService:
         try:
             entry = TimerEntry.from_dict(data)
             self._timers.set_timer(entry)
+            # When a timer is set via MQTT, stop automatic unsolicited sensor publishes
+            try:
+                self._auto_publish_sensor = False
+                logger.info("Automatic sensorData publishing disabled due to timer set: %s", entry.id)
+            except Exception:
+                pass
             self._mqtt.publish("timer/status", {
                 "action": "set",
                 "timer": entry.to_dict(),
@@ -232,6 +262,62 @@ class ArduinoBridgeService:
             "timers": timers,
             "time": _now_iso(),
         })
+
+    def _handle_capture_order(self, data: dict):
+        """Schedule a photo capture from MQTT payload."""
+        delay_s = _parse_capture_delay(data)
+        logger.info("Capture order received; delaying %.3fs", delay_s)
+
+        worker = threading.Thread(
+            target=self._capture_and_publish_photo,
+            args=(delay_s,),
+            daemon=True,
+            name="photo-capture",
+        )
+        worker.start()
+
+    def _capture_and_publish_photo(self, delay_s: float):
+        try:
+            result = self._photo_capture.capture(delay_s=delay_s)
+            with self._photo_lock:
+                self._mqtt.publish("photo", result.content)
+
+            logger.info(
+                "Photo captured and published: %s (%d bytes)",
+                result.filename,
+                len(result.content),
+            )
+        except PhotoCaptureError as exc:
+            logger.error("Photo capture failed: %s", exc)
+        except Exception as exc:
+            logger.exception("Unexpected photo capture error: %s", exc)
+
+
+def _parse_capture_delay(data: dict) -> float:
+    raw_value = data.get("time", 0)
+
+    if raw_value is None or raw_value == "":
+        return 0.0
+
+    if isinstance(raw_value, (int, float)):
+        return max(0.0, float(raw_value))
+
+    if isinstance(raw_value, str):
+        try:
+            return max(0.0, float(raw_value))
+        except ValueError:
+            pass
+
+        try:
+            target = datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
+            now = datetime.now(target.tzinfo or timezone.utc)
+            return max(0.0, (target - now).total_seconds())
+        except ValueError as exc:
+            raise ValueError(
+                "captureorder.time must be a delay in seconds or an ISO-8601 timestamp"
+            ) from exc
+
+    raise ValueError("captureorder.time must be numeric or a timestamp string")
 
 
 def _now_iso() -> str:
