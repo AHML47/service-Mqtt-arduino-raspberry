@@ -68,7 +68,7 @@ DEFAULT_CONFIG = {
     },
     "photo": {
         "output_dir": "photos",
-        "resolution": [4608, 2592],
+        "resolution": [1280, 720],
         "warmup_s": 2.0,
         "autofocus": True,
     },

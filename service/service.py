@@ -68,6 +68,7 @@ class HydroponicBridgeService:
         logger.info("  Hydroponic Bridge Service starting")
         logger.info("=" * 50)
         try:
+            self._photo_capture.start()
             self._serial.start()
             self._mqtt.start()
             self._running = True
@@ -85,6 +86,7 @@ class HydroponicBridgeService:
         self._running = False
         self._mqtt.stop()
         self._serial.stop()
+        self._photo_capture.stop()
         logger.info("Service stopped")
 
     # ── Arduino → MQTT (sensor data) ─────────────────────────

@@ -56,7 +56,7 @@ else
 fi
 
 echo "[2/5] Creating/updating virtual environment: ${VENV_DIR}"
-"${PYTHON_BIN}" -m venv "${VENV_DIR}"
+"${PYTHON_BIN}" -m venv --system-site-packages "${VENV_DIR}"
 "${VENV_DIR}/bin/pip" install --upgrade pip
 "${VENV_DIR}/bin/pip" install -r "${PROJECT_DIR}/requirements.txt"
 
