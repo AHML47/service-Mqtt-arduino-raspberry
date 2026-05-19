@@ -9,6 +9,7 @@ Publications:
     {prefix}/capturedPhoto → JPEG bytes
 """
 
+import ast
 import json
 import logging
 import time
@@ -135,9 +136,25 @@ class MQTTClient:
         try:
             if suffix == "capturePhoto":
                 if self.on_capture_photo:
-                    data = json.loads(payload) if payload else {}
+                    data = _parse_payload(payload)
                     self.on_capture_photo(data)
-        except json.JSONDecodeError as e:
-            logger.error("Bad JSON on %s: %s", topic, e)
         except Exception as e:
             logger.exception("Error handling message on %s: %s", topic, e)
+
+
+def _parse_payload(raw: str) -> dict:
+    """Parse a JSON payload, falling back to ast.literal_eval for single-quoted strings."""
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+    try:
+        result = ast.literal_eval(raw)
+        if isinstance(result, dict):
+            return result
+    except Exception:
+        pass
+    logger.warning("Could not parse payload as JSON or dict literal: %s", raw[:120])
+    return {}
