@@ -7,11 +7,11 @@ import logging
 import sys
 
 from .config import load_config
-from .service import ArduinoBridgeService
+from .service import HydroponicBridgeService
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Arduino Bridge Service")
+    parser = argparse.ArgumentParser(description="Hydroponic Bridge Service")
     parser.add_argument(
         "--config", "-c",
         default="config.yaml",
@@ -21,7 +21,6 @@ def main():
 
     config = load_config(args.config)
 
-    # Set up logging
     log_level = config.get("logging", {}).get("level", "INFO")
     logging.basicConfig(
         level=getattr(logging, log_level.upper(), logging.INFO),
@@ -29,7 +28,7 @@ def main():
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    service = ArduinoBridgeService(config)
+    service = HydroponicBridgeService(config)
     service.run()
 
 

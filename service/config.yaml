@@ -1,20 +1,25 @@
-# ── Arduino Bridge Configuration ─────────────────────────────
-# Copy to config.yaml and edit for your setup.
+# ── Hydroponic Bridge Configuration ──────────────────────────
+# Copy to config.yaml (project root) and edit for your setup.
+# Set the CONNECTION_STRING environment variable to define the
+# MQTT prefix: hydroponic/{CONNECTION_STRING}
 
 serial:
-  port: auto               # auto-detect the Arduino serial port
+  port: auto               # auto-detect Arduino serial port
   baudrate: 9600
-  timeout: 1.0             # serial read timeout (seconds)
-  response_timeout: 2.0    # max wait for Arduino reply
+  timeout: 1.0
+  response_timeout: 2.0
 
 mqtt:
-  host: 165.232.139.240           # your MQTT broker IP
+  host: 165.232.139.240
   port: 1885
   username: backend
   password: backend
-  client_id: arduino-bridge
-  topic_prefix: arduino     # all topics start with this
+  client_id: hydroponic-bridge
+  # topic_prefix is set automatically from CONNECTION_STRING env var.
+  # Override here only if not using the env var.
+  topic_prefix: hydroponic/default
   qos: 1
+  keepalive: 6000
 
 photo:
   output_dir: photos
@@ -22,13 +27,5 @@ photo:
   warmup_s: 2.0
   autofocus: true
 
-timers:
-  persist_file: timers.json
-
-  # Default timers — created on first run.
-  # After that, manage via MQTT (arduino/timer/set, /delete).
-  defaults:
-    
-
 logging:
-  level: DEBUG              # DEBUG for troubleshooting
+  level: DEBUG

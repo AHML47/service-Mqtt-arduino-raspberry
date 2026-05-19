@@ -51,16 +51,16 @@ DEFAULT_CONFIG = {
     "serial": {
         "port": "auto",
         "baudrate": 9600,
-        "timeout": 1.0,          # read timeout (seconds)
-        "response_timeout": 2.0, # max wait for Arduino reply
+        "timeout": 1.0,
+        "response_timeout": 2.0,
     },
     "mqtt": {
         "host": "165.232.139.240",
         "port": 1885,
         "username": "backend",
         "password": "backend",
-        "client_id": "arduino-bridge",
-        "topic_prefix": "arduino",
+        "client_id": "hydroponic-bridge",
+        "topic_prefix": "hydroponic/default",
         "connect_timeout": 30,
         "connect_retries": 10,
         "qos": 1,
@@ -71,32 +71,6 @@ DEFAULT_CONFIG = {
         "resolution": [4608, 2592],
         "warmup_s": 2.0,
         "autofocus": True,
-    },
-    "timers": {
-        "persist_file": "timers.json",
-        # Enable the timer subsystem. Set to False to disable timers entirely.
-        "enabled": True,
-        # Load the default timers on first run. Set to False to prevent
-        # creating the built-in timers (dht_temp / dht_hum).
-        "load_defaults": True,
-        "defaults": [
-            {
-                "id": "dht_temp",
-                "command": "dht1:TEMP",
-                "interval_s": 30,
-                "enabled": True,
-                "publish_to": "arduino/sensor/temperature",
-                "parse": "float",
-            },
-            {
-                "id": "dht_hum",
-                "command": "dht1:HUM",
-                "interval_s": 30,
-                "enabled": True,
-                "publish_to": "arduino/sensor/humidity",
-                "parse": "float",
-            },
-        ],
     },
     "logging": {
         "level": "DEBUG",
@@ -117,11 +91,12 @@ def _deep_merge(base: dict, override: dict) -> dict:
 
 def load_config(path: str = "config.yaml") -> dict:
     """
-    Load configuration from YAML file (if present), merged on top of defaults.
-    Environment variables override individual keys:
+    Load configuration from YAML file merged on top of defaults.
+    Environment variable overrides:
       ARDUINO_SERIAL_PORT  →  config["serial"]["port"]
       ARDUINO_MQTT_HOST    →  config["mqtt"]["host"]
       ARDUINO_MQTT_PORT    →  config["mqtt"]["port"]
+      CONNECTION_STRING    →  MQTT prefix as hydroponic/{value}
     """
     config = DEFAULT_CONFIG.copy()
 
