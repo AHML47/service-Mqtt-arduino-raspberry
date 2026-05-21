@@ -75,6 +75,7 @@ DEFAULT_CONFIG = {
     "logging": {
         "level": "DEBUG",
     },
+    "cycles": [],
 }
 
 

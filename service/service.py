@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from .photo_capture import PhotoCaptureError, PhotoCaptureService
 from .serial_conn import SerialConnection
 from .mqtt_client import MQTTClient
+from .cycle_manager import CycleManager
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,16 @@ class HydroponicBridgeService:
         )
         self._photo_lock = threading.Lock()
 
+        # ── Cycles ───────────────────────────────────────────
+        self._cycle_manager = CycleManager(
+            cycles_config=config.get("cycles", []),
+            serial=self._serial,
+            mqtt=self._mqtt,
+            topic_prefix=mcfg.get("topic_prefix", "hydroponic/default"),
+        )
+        # Capture runs synchronously in the cycle thread so delay_after is accurate
+        self._cycle_manager.on_capture_photo = lambda: self._capture_and_publish(0.0)
+
     # ── Lifecycle ────────────────────────────────────────────
 
     def run(self):
@@ -71,6 +82,7 @@ class HydroponicBridgeService:
             self._photo_capture.start()
             self._serial.start()
             self._mqtt.start()
+            self._cycle_manager.start()
             self._running = True
             logger.info("Service is running. Press Ctrl+C to stop.")
             while self._running:
@@ -84,6 +96,7 @@ class HydroponicBridgeService:
 
     def _shutdown(self):
         self._running = False
+        self._cycle_manager.stop()
         self._mqtt.stop()
         self._serial.stop()
         self._photo_capture.stop()

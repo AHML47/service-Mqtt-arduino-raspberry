@@ -113,6 +113,11 @@ class MQTTClient:
         self._client.publish(topic, image_bytes, qos=self._qos)
         logger.debug("PUB %s → <binary %d bytes>", topic, len(image_bytes))
 
+    def publish_raw(self, topic: str, payload: str):
+        """Publish a raw string payload to an explicit topic."""
+        self._client.publish(topic, payload, qos=self._qos)
+        logger.debug("PUB %s → %s", topic, str(payload)[:120])
+
     # ── MQTT callbacks ───────────────────────────────────────
 
     def _on_connect(self, client, userdata, flags, rc, properties=None):
