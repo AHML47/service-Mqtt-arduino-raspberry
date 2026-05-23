@@ -31,11 +31,13 @@ class PhotoCaptureService:
         self,
         output_dir: str = "photos",
         resolution: Tuple[int, int] = (1280, 720),
+        raw_resolution: Tuple[int, int] = (4608, 2592),
         warmup_s: float = 2.0,
         autofocus: bool = True,
     ):
         self._output_dir = Path(output_dir)
         self._resolution = resolution
+        self._raw_resolution = raw_resolution
         self._warmup_s = warmup_s
         self._autofocus = autofocus
         self._picam2 = None
@@ -51,7 +53,8 @@ class PhotoCaptureService:
 
         self._picam2 = Picamera2()
         config = self._picam2.create_video_configuration(
-            main={"size": self._resolution, "format": "RGB888"}
+            main={"size": self._resolution, "format": "RGB888"},
+            raw={"size": self._raw_resolution},
         )
         self._picam2.configure(config)
         self._picam2.start()

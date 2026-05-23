@@ -53,10 +53,12 @@ class HydroponicBridgeService:
 
         # ── Camera ───────────────────────────────────────────
         pcfg = config.get("photo", {})
-        resolution = pcfg.get("resolution", [4608, 2592])
+        resolution = pcfg.get("resolution", [1280, 720])
+        raw_resolution = pcfg.get("raw_resolution", [4608, 2592])
         self._photo_capture = PhotoCaptureService(
             output_dir=pcfg.get("output_dir", "photos"),
             resolution=(int(resolution[0]), int(resolution[1])),
+            raw_resolution=(int(raw_resolution[0]), int(raw_resolution[1])),
             warmup_s=float(pcfg.get("warmup_s", 2.0)),
             autofocus=bool(pcfg.get("autofocus", True)),
         )

@@ -24,6 +24,7 @@ mqtt:
 photo:
   output_dir: photos
   resolution: [1280, 720]
+  raw_resolution: [4608, 2592]
   warmup_s: 2.0
   autofocus: true
 
@@ -44,28 +45,6 @@ logging:
 # delay_after: N  → wait N seconds after this command before the next one.
 
 cycles:
-  - name: bi_hourly_sensors
-    interval: 7200          # 2 hours
-    run_on_start: false
-    commands:
-      - type: serial
-        command: dht1:READ
-        publish_response: true
-      - type: serial
-        command: pump1:STATUS
-        publish_response: true
-
-  - name: hourly_maintenance
-    interval: 3600          # 1 hour
-    run_on_start: false
-    commands:
-      - type: serial
-        command: step1:MOVE:500:100
-        publish_response: false
-      - type: mqtt
-        topic: "{prefix}/cycleStatus"
-        payload: '{"event": "hourly_maintenance", "status": "executed"}'
-
   - name: tri_hourly_cultivation
     interval: 10800         # 3 hours
     run_on_start: true      # also runs immediately when the service starts
