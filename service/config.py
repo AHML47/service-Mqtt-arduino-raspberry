@@ -61,6 +61,7 @@ DEFAULT_CONFIG = {
         "password": "backend",
         "client_id": "hydroponic-bridge",
         "topic_prefix": "hydroponic/default",
+        "publish_sensor_data": False,
         "connect_timeout": 30,
         "connect_retries": 10,
         "qos": 1,

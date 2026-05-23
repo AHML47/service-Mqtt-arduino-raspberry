@@ -37,6 +37,7 @@ class HydroponicBridgeService:
 
         # ── MQTT ─────────────────────────────────────────────
         mcfg = config["mqtt"]
+        self._publish_sensor_data = bool(mcfg.get("publish_sensor_data", False))
         self._mqtt = MQTTClient(
             host=mcfg["host"],
             port=mcfg["port"],
@@ -70,6 +71,7 @@ class HydroponicBridgeService:
             serial=self._serial,
             mqtt=self._mqtt,
             topic_prefix=mcfg.get("topic_prefix", "hydroponic/default"),
+            publish_sensor_data=self._publish_sensor_data,
         )
         # Capture runs synchronously in the cycle thread so delay_after is accurate
         self._cycle_manager.on_capture_photo = lambda: self._capture_and_publish(0.0)
@@ -108,6 +110,9 @@ class HydroponicBridgeService:
 
     def _handle_push(self, device: str, payload: str):
         """Parse unsolicited Arduino push and publish to sensorData."""
+        if not self._publish_sensor_data:
+            return
+
         # DHT sensor: "OK:temperature:humidity"
         if device.lower().startswith("dht") and payload.startswith("OK:"):
             parts = payload[3:].split(":")

@@ -41,11 +41,13 @@ class CycleManager:
         serial: SerialConnection,
         mqtt: MQTTClient,
         topic_prefix: str,
+        publish_sensor_data: bool = False,
     ):
         self._cycles = cycles_config
         self._serial = serial
         self._mqtt = mqtt
         self._prefix = topic_prefix
+        self._publish_sensor_data = publish_sensor_data
         self._stop_events: List[threading.Event] = []
         self._threads: List[threading.Thread] = []
 
@@ -148,6 +150,10 @@ class CycleManager:
 
     def _publish_serial_response(self, command: str, response: str):
         """Parse an OK: serial response and forward it to MQTT sensorData."""
+        if not self._publish_sensor_data:
+            logger.debug("Cycle serial: sensorData publishing disabled; skipping %s", command)
+            return
+
         if not response.startswith("OK:"):
             logger.warning(
                 "Cycle serial: skipping non-OK response for '%s': %s", command, response

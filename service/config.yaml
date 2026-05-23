@@ -15,6 +15,7 @@ mqtt:
   username: backend
   password: backend
   client_id: hydroponic-bridge
+  publish_sensor_data: false
   # topic_prefix is set automatically from CONNECTION_STRING env var.
   # Override here only if not using the env var.
   topic_prefix: hydroponic/default
