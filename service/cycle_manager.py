@@ -10,7 +10,7 @@ Config structure (config.yaml → cycles):
       run_on_start: false     # execute immediately on start(), then repeat
       commands:
         - type: serial
-          command: "dht11:READ"
+          command: "dht1:READ"
           publish_response: true   # parse OK response → sensorData
           delay_after: 2           # seconds to wait after this command
         - type: photo

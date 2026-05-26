@@ -4,13 +4,13 @@ Sensor registry — maps semantic sensor names to Arduino device/field definitio
 Config example (config.yaml → sensors):
     sensors:
       - name: temperature
-        arduino_device: dht11
+        arduino_device: dht1
         field_index: 0          # index in the colon-separated OK response
-        command: "dht11:READ"
+        command: "dht1:READ"
       - name: humidity
-        arduino_device: dht11
+        arduino_device: dht1
         field_index: 1
-        command: "dht11:READ"
+        command: "dht1:READ"
       - name: water_level
         arduino_device: level1
         field_index: 0
@@ -27,9 +27,9 @@ logger = logging.getLogger(__name__)
 @dataclass
 class SensorDef:
     name: str            # semantic name shown on MQTT, e.g. "temperature"
-    arduino_device: str  # Arduino component id (lowercase), e.g. "dht11"
+    arduino_device: str  # Arduino component id (lowercase), e.g. "dht1"
     field_index: int     # index into "OK:v0:v1:v2" response fields
-    command: str         # full command string sent to Arduino, e.g. "dht11:READ"
+    command: str         # full command string sent to Arduino, e.g. "dht1:READ"
 
 
 class SensorRegistry:
