@@ -60,7 +60,9 @@ DEFAULT_CONFIG = {
         "username": "backend",
         "password": "backend",
         "client_id": "hydroponic-bridge",
+        # Overridden at runtime by CONNECTION_STRING env var → hydroponic/{conn}
         "topic_prefix": "hydroponic/default",
+        # When true, unsolicited Arduino push lines are forwarded to sensorData
         "publish_sensor_data": False,
         "connect_timeout": 30,
         "connect_retries": 10,
@@ -77,6 +79,24 @@ DEFAULT_CONFIG = {
     "logging": {
         "level": "DEBUG",
     },
+    # Sensor name → Arduino device mapping.
+    # field_index: position in the colon-separated OK response (0-based).
+    # command: full string sent to the Arduino to request a reading.
+    # Add new sensors here or override in config.yaml.
+    "sensors": [
+        {
+            "name": "temperature",
+            "arduino_device": "dht11",
+            "field_index": 0,
+            "command": "dht11:READ",
+        },
+        {
+            "name": "humidity",
+            "arduino_device": "dht11",
+            "field_index": 1,
+            "command": "dht11:READ",
+        },
+    ],
     "cycles": [],
 }
 

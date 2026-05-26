@@ -1,12 +1,15 @@
 """
-MQTT Client for the hydroponic bridge.
+MQTT client for the hydroponic bridge.
 
-Subscriptions:
-    {prefix}/capturePhoto  → {"time": <delay_seconds>}
+Inbound topics are dispatched through a TopicRouter — no handlers are
+hardcoded here. Registering a new topic requires only a router.register()
+call in service.py before start() is called.
 
-Publications:
-    {prefix}/sensorData    → {"sensorname":"<name>","value":<v>,"time":"<iso>"}
-    {prefix}/capturedPhoto → JPEG bytes
+Publications (outgoing):
+    {prefix}/sensorData       → {"<name>": <value>, "time": "<iso>"}
+    {prefix}/capturedPhoto    → JPEG bytes (binary)
+    {prefix}/commandResponse  → {"command": "...", "response": "...", "time": "..."}
+    {prefix}/pong             → {"status": "online", "time": "..."}
 """
 
 import ast
@@ -14,13 +17,13 @@ import json
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Callable, Optional
+from typing import Optional
 
 import paho.mqtt.client as mqtt
 
-logger = logging.getLogger(__name__)
+from .topic_router import TopicRouter
 
-CapturePhotoCallback = Callable[[dict], None]
+logger = logging.getLogger(__name__)
 
 
 class MQTTClient:
@@ -28,6 +31,7 @@ class MQTTClient:
         self,
         host: str,
         port: int,
+        router: TopicRouter,
         username: Optional[str] = None,
         password: Optional[str] = None,
         client_id: str = "hydroponic-bridge",
@@ -39,11 +43,13 @@ class MQTTClient:
     ):
         self._host = host
         self._port = port
+        self._router = router
         self._prefix = topic_prefix
         self._qos = qos
         self._keepalive = keepalive
         self._connect_timeout = connect_timeout
         self._connect_retries = connect_retries
+        self._connected = False
 
         self._client = mqtt.Client(
             client_id=client_id,
@@ -54,9 +60,6 @@ class MQTTClient:
 
         self._client.on_connect = self._on_connect
         self._client.on_message = self._on_message
-        self._connected = False
-
-        self.on_capture_photo: Optional[CapturePhotoCallback] = None
 
     # ── Lifecycle ────────────────────────────────────────────
 
@@ -90,7 +93,7 @@ class MQTTClient:
             except Exception as e:
                 logger.exception("MQTT connect attempt %d failed: %s", attempt, e)
 
-        logger.error("Failed to connect to MQTT broker after %d attempts", self._connect_retries)
+        logger.error("Failed to connect to MQTT broker after %d attempt(s)", self._connect_retries)
 
     def stop(self):
         self._client.loop_stop()
@@ -99,10 +102,11 @@ class MQTTClient:
 
     # ── Publish helpers ──────────────────────────────────────
 
-    def publish_sensor_data(self, sensorname: str, value):
+    def publish_sensor_data(self, sensor_name: str, value: object):
+        """Publish one sensor reading to {prefix}/sensorData."""
         topic = f"{self._prefix}/sensorData"
         payload = json.dumps({
-            sensorname: value,
+            sensor_name: value,
             "time": datetime.now(timezone.utc).isoformat(),
         })
         self._client.publish(topic, payload, qos=self._qos)
@@ -114,41 +118,43 @@ class MQTTClient:
         logger.debug("PUB %s → <binary %d bytes>", topic, len(image_bytes))
 
     def publish_raw(self, topic: str, payload: str):
-        """Publish a raw string payload to an explicit topic."""
+        """Publish a raw string payload to an explicit topic (absolute path)."""
         self._client.publish(topic, payload, qos=self._qos)
         logger.debug("PUB %s → %s", topic, str(payload)[:120])
 
     # ── MQTT callbacks ───────────────────────────────────────
 
-    def _on_connect(self, client, userdata, flags, rc, properties=None):
-        if rc == 0:
-            logger.info("MQTT connected (prefix: %s)", self._prefix)
-            self._connected = True
-            topic = f"{self._prefix}/capturePhoto"
-            client.subscribe(topic, qos=self._qos)
-            logger.info("Subscribed: %s", topic)
-        else:
+    def _on_connect(self, client, _userdata, _flags, rc, _properties=None):
+        if rc != 0:
             logger.error("MQTT connect failed, rc=%d", rc)
             self._connected = False
+            return
 
-    def _on_message(self, client, userdata, msg):
+        self._connected = True
+        logger.info("MQTT connected (prefix: %s)", self._prefix)
+
+        # Subscribe to every suffix the router knows about
+        for suffix in self._router.registered_suffixes():
+            topic = f"{self._prefix}/{suffix}"
+            client.subscribe(topic, qos=self._qos)
+            logger.info("Subscribed: %s", topic)
+
+    def _on_message(self, _client, _userdata, msg):
         topic = msg.topic
-        payload = msg.payload.decode("utf-8", errors="replace").strip()
-        logger.debug("MSG %s → %s", topic, payload[:120])
+        raw = msg.payload.decode("utf-8", errors="replace").strip()
+        logger.debug("MSG %s → %s", topic, raw[:120])
 
-        suffix = topic[len(self._prefix) + 1:]
+        prefix_with_slash = self._prefix + "/"
+        if not topic.startswith(prefix_with_slash):
+            return
 
-        try:
-            if suffix == "capturePhoto":
-                if self.on_capture_photo:
-                    data = _parse_payload(payload)
-                    self.on_capture_photo(data)
-        except Exception as e:
-            logger.exception("Error handling message on %s: %s", topic, e)
+        suffix = topic[len(prefix_with_slash):]
+        payload = _parse_payload(raw)
+        self._router.route(suffix, payload)
 
 
 def _parse_payload(raw: str) -> dict:
-    """Parse a JSON payload, falling back to ast.literal_eval for single-quoted strings."""
+    """Parse JSON payload, falling back to ast.literal_eval for single-quoted strings."""
     if not raw:
         return {}
     try:
@@ -161,5 +167,5 @@ def _parse_payload(raw: str) -> dict:
             return result
     except Exception:
         pass
-    logger.warning("Could not parse payload as JSON or dict literal: %s", raw[:120])
+    logger.warning("Cannot parse payload as JSON or dict literal: %s", raw[:120])
     return {}

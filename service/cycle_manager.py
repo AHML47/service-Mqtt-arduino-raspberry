@@ -1,18 +1,17 @@
 """
 CycleManager — executes command groups on a fixed interval.
 
-Each cycle group runs in its own daemon thread, sleeping between executions.
-Commands can target the Arduino (serial), publish directly to MQTT, or
-trigger a photo capture.
+Each cycle group runs in its own daemon thread. Commands can target the
+Arduino (serial), publish directly to MQTT, or trigger a photo capture.
 
 Config structure (config.yaml → cycles):
     - name: "group_name"
-      interval: 3600        # seconds between executions
-      run_on_start: false   # execute immediately on start(), then repeat
+      interval: 3600          # seconds between executions
+      run_on_start: false     # execute immediately on start(), then repeat
       commands:
         - type: serial
-          command: "dht1:READ"
-          publish_response: true   # parse OK response → sensorData topic
+          command: "dht11:READ"
+          publish_response: true   # parse OK response → sensorData
           delay_after: 2           # seconds to wait after this command
         - type: photo
           delay_after: 2
@@ -28,6 +27,7 @@ from typing import Callable, List, Optional
 
 from .serial_conn import SerialConnection
 from .mqtt_client import MQTTClient
+from .sensor_registry import SensorRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -41,17 +41,18 @@ class CycleManager:
         serial: SerialConnection,
         mqtt: MQTTClient,
         topic_prefix: str,
+        sensor_registry: SensorRegistry,
         publish_sensor_data: bool = False,
     ):
         self._cycles = cycles_config
         self._serial = serial
         self._mqtt = mqtt
         self._prefix = topic_prefix
+        self._sensor_registry = sensor_registry
         self._publish_sensor_data = publish_sensor_data
         self._stop_events: List[threading.Event] = []
         self._threads: List[threading.Thread] = []
 
-        # Set by the service to perform a synchronous capture + publish
         self.on_capture_photo: Optional[CaptureCallback] = None
 
     # ── Lifecycle ────────────────────────────────────────────
@@ -99,7 +100,6 @@ class CycleManager:
         if run_on_start:
             self._execute_group(name, commands)
 
-        # stop_event.wait returns True when stop() is called → loop exits
         while not stop_event.wait(timeout=interval):
             self._execute_group(name, commands)
 
@@ -122,10 +122,9 @@ class CycleManager:
             if not command:
                 logger.warning("Cycle: serial entry missing 'command' field")
                 return
-            publish = bool(cmd.get("publish_response", False))
             response = self._serial.send(command)
             logger.debug("Cycle serial: %s → %s", command, response)
-            if publish:
+            if cmd.get("publish_response", False):
                 self._publish_serial_response(command, response)
 
         elif cmd_type == "mqtt":
@@ -141,41 +140,22 @@ class CycleManager:
             if self.on_capture_photo:
                 self.on_capture_photo()
             else:
-                logger.warning("Cycle: photo command but on_capture_photo callback is not set")
+                logger.warning("Cycle: photo command but on_capture_photo is not set")
 
         else:
             logger.warning("Cycle: unknown command type '%s'", cmd_type)
 
-    # ── Internal: serial response → MQTT ─────────────────────
+    # ── Serial response → MQTT sensorData ────────────────────
 
     def _publish_serial_response(self, command: str, response: str):
-        """Parse an OK: serial response and forward it to MQTT sensorData."""
         if not self._publish_sensor_data:
-            logger.debug("Cycle serial: sensorData publishing disabled; skipping %s", command)
+            logger.debug("Cycle: sensorData publishing disabled; skipping '%s'", command)
             return
 
         if not response.startswith("OK:"):
-            logger.warning(
-                "Cycle serial: skipping non-OK response for '%s': %s", command, response
-            )
+            logger.warning("Cycle: non-OK response for '%s': %s", command, response)
             return
 
-        device = command.split(":")[0]
-        parts = response[3:].split(":")
-
-        # DHT-style: two values → temperature and humidity
-        if device.lower().startswith("dht") and len(parts) >= 2:
-            try:
-                self._mqtt.publish_sensor_data("temperature", float(parts[0]))
-                self._mqtt.publish_sensor_data("humidity", float(parts[1]))
-                return
-            except ValueError:
-                pass
-
-        # Generic single value
-        raw = parts[0]
-        try:
-            value: object = float(raw)
-        except ValueError:
-            value = raw
-        self._mqtt.publish_sensor_data(device, value)
+        device = command.split(":")[0].lower()
+        for sensor_name, value in self._sensor_registry.parse_push(device, response):
+            self._mqtt.publish_sensor_data(sensor_name, value)
