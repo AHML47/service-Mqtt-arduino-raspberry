@@ -86,13 +86,13 @@ DEFAULT_CONFIG = {
     "sensors": [
         {
             "name": "temperature",
-            "arduino_device": "dht1",
+            "arduino_device": "temperature",
             "field_index": 0,
             "command": "dht1:TEMP",
         },
         {
             "name": "humidity",
-            "arduino_device": "dht1",
+            "arduino_device": "temperature",
             "field_index": 1,
             "command": "dht1:HUM",
         },

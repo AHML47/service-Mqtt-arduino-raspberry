@@ -48,7 +48,7 @@ logging:
 cycles:
   - name: tri_hourly_cultivation
     interval: 10800         # 3 hours
-    run_on_start: true      # also runs immediately when the service starts
+    run_on_start: false      # also runs immediately when the service starts
     commands:
       - type: serial
         command: dc1:ON
