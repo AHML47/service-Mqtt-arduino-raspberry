@@ -28,6 +28,7 @@ from typing import Callable, List, Optional
 from .serial_conn import SerialConnection
 from .mqtt_client import MQTTClient
 from .sensor_registry import SensorRegistry
+from .operator_registry import OperatorRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -43,12 +44,14 @@ class CycleManager:
         topic_prefix: str,
         sensor_registry: SensorRegistry,
         publish_sensor_data: bool = False,
+        operator_registry: Optional[OperatorRegistry] = None,
     ):
         self._cycles = cycles_config
         self._serial = serial
         self._mqtt = mqtt
         self._prefix = topic_prefix
         self._sensor_registry = sensor_registry
+        self._operators = operator_registry
         self._publish_sensor_data = publish_sensor_data
         self._stop_events: List[threading.Event] = []
         self._threads: List[threading.Thread] = []
@@ -141,6 +144,17 @@ class CycleManager:
                 self.on_capture_photo()
             else:
                 logger.warning("Cycle: photo command but on_capture_photo is not set")
+
+        elif cmd_type == "operator":
+            op_name = cmd.get("operator", "").strip()
+            if not self._operators:
+                logger.warning("Cycle: operator registry not configured; skipping '%s'", op_name)
+                return
+            op = self._operators.get(op_name)
+            if not op:
+                logger.warning("Cycle: unknown operator '%s'", op_name)
+                return
+            self._operators.execute(op, cmd.get("param", {}) or {}, self._serial)
 
         else:
             logger.warning("Cycle: unknown command type '%s'", cmd_type)

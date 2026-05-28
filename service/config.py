@@ -60,8 +60,8 @@ DEFAULT_CONFIG = {
         "username": "backend",
         "password": "backend",
         "client_id": "hydroponic-bridge",
-        # Overridden at runtime by CONNECTION_STRING env var → hydroponic/{conn}
-        "topic_prefix": "hydroponic/default",
+        # Overridden at runtime by CONNECTION_STRING + ZONE_NAME env vars → hydroponic/{conn}/{zone}
+        "topic_prefix": "hydroponic/default/default",
         # When true, unsolicited Arduino push lines are forwarded to sensorData
         "publish_sensor_data": False,
         "connect_timeout": 30,
@@ -76,6 +76,10 @@ DEFAULT_CONFIG = {
         "warmup_s": 2.0,
         "autofocus": True,
     },
+    "streaming": {
+        "enabled": False,
+        "port": 8000,
+    },
     "logging": {
         "level": "DEBUG",
     },
@@ -85,19 +89,21 @@ DEFAULT_CONFIG = {
     # Add new sensors here or override in config.yaml.
     "sensors": [
         {
-            "name": "temperature",
+            "name": "SN_18d79c7303",
             "arduino_device": "temperature",
             "field_index": 0,
-            "command": "dht1:TEMP",
+            "command": "temperature:TEMP",
         },
         {
-            "name": "humidity",
+            "name": "SN_0093d96dfb",
             "arduino_device": "temperature",
-            "field_index": 1,
-            "command": "dht1:HUM",
+            "field_index": 0,
+            "command": "temperature:HUM",
         },
     ],
     "cycles": [],
+    # Operator definitions (first-class actuators). See service/operator_registry.py
+    "operators": [],
 }
 
 
@@ -119,7 +125,8 @@ def load_config(path: str = "config.yaml") -> dict:
       ARDUINO_SERIAL_PORT  →  config["serial"]["port"]
       ARDUINO_MQTT_HOST    →  config["mqtt"]["host"]
       ARDUINO_MQTT_PORT    →  config["mqtt"]["port"]
-      CONNECTION_STRING    →  MQTT prefix as hydroponic/{value}
+      CONNECTION_STRING    →  part of MQTT prefix
+      ZONE_NAME           →  MQTT prefix as hydroponic/{CONNECTION_STRING}/{ZONE_NAME}
     """
     config = DEFAULT_CONFIG.copy()
 
@@ -172,9 +179,8 @@ def load_config(path: str = "config.yaml") -> dict:
             cast = spec[2] if len(spec) > 2 else str
             config[section][key] = cast(val)
 
-    # If a connection string is provided as an environment variable, use the
-    # requested topic format: `hydroponic/{connectionString}` as the MQTT prefix.
-    # Accept a few common env var names for compatibility.
+    # If a connection string and zone name are provided as environment variables,
+    # build the MQTT prefix as `hydroponic/{connectionString}/{zoneName}`.
     conn = (
         env_file_values.get("CONNECTION_STRING")
         or env_file_values.get("ARDUINO_CONNECTION_STRING")
@@ -183,7 +189,13 @@ def load_config(path: str = "config.yaml") -> dict:
         or os.environ.get("ARDUINO_CONNECTION_STRING")
         or os.environ.get("HYDROPONIC_CONNECTION")
     )
-    if conn:
+    zone = (
+        env_file_values.get("ZONE_NAME")
+        or os.environ.get("ZONE_NAME")
+    )
+    if conn and zone:
+        config["mqtt"]["topic_prefix"] = f"hydroponic/{conn}/{zone}"
+    elif conn:
         config["mqtt"]["topic_prefix"] = f"hydroponic/{conn}"
 
     # Auto-detect the Arduino serial port when not explicitly configured.

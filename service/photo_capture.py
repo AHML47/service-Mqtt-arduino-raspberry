@@ -34,20 +34,31 @@ class PhotoCaptureService:
         raw_resolution: Tuple[int, int] = (4608, 2592),
         warmup_s: float = 2.0,
         autofocus: bool = True,
+        streaming: bool = False,
     ):
         self._output_dir = Path(output_dir)
         self._resolution = resolution
         self._raw_resolution = raw_resolution
         self._warmup_s = warmup_s
         self._autofocus = autofocus
+        self._streaming = streaming
         self._picam2 = None
         self._lock = threading.Lock()
+        self._streaming_output = None
+        self._camera_state = None
+
+    @property
+    def streaming_output(self):
+        return self._streaming_output
+
+    @property
+    def camera_state(self):
+        return self._camera_state
 
     def start(self):
         """Start the camera stream once at service startup."""
         try:
             from picamera2 import Picamera2
-            from libcamera import controls as lc
         except Exception as exc:
             raise PhotoCaptureError(f"picamera2 import failed: {exc}") from exc
 
@@ -57,26 +68,51 @@ class PhotoCaptureService:
             raw={"size": self._raw_resolution},
         )
         self._picam2.configure(config)
-        self._picam2.start()
-        time.sleep(self._warmup_s)
 
-        if self._autofocus:
+        if self._streaming:
             try:
-                self._picam2.set_controls({"AfMode": lc.AfModeEnum.Continuous})
-                logger.info("Autofocus set to continuous")
+                from picamera2.encoders import MJPEGEncoder
+                from picamera2.outputs import FileOutput
+                from .camera_stream import StreamingOutput, CameraState
             except Exception as exc:
-                logger.debug("Continuous autofocus not available: %s", exc)
+                raise PhotoCaptureError(f"streaming imports failed: {exc}") from exc
 
-        logger.info("Camera started (%dx%d)", *self._resolution)
+            self._streaming_output = StreamingOutput()
+            self._picam2.start_recording(MJPEGEncoder(), FileOutput(self._streaming_output))
+            time.sleep(self._warmup_s)
+            self._camera_state = CameraState(self._picam2)
+        else:
+            try:
+                from libcamera import controls as lc
+                lc_available = True
+            except ImportError:
+                lc_available = False
+
+            self._picam2.start()
+            time.sleep(self._warmup_s)
+
+            if self._autofocus and lc_available:
+                try:
+                    self._picam2.set_controls({"AfMode": lc.AfModeEnum.Continuous})
+                    logger.info("Autofocus set to continuous")
+                except Exception as exc:
+                    logger.debug("Continuous autofocus not available: %s", exc)
+
+        logger.info("Camera started (%dx%d, streaming=%s)", *self._resolution, self._streaming)
 
     def stop(self):
         """Stop the camera stream at service shutdown."""
         if self._picam2:
             try:
-                self._picam2.stop()
+                if self._streaming:
+                    self._picam2.stop_recording()
+                else:
+                    self._picam2.stop()
             except Exception:
                 pass
             self._picam2 = None
+        self._streaming_output = None
+        self._camera_state = None
         logger.info("Camera stopped")
 
     def capture(self, delay_s: float = 0.0) -> PhotoCaptureResult:

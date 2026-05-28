@@ -22,11 +22,14 @@ import logging
 import threading
 import time
 from datetime import datetime, timezone
+import functools
 
 from .photo_capture import PhotoCaptureError, PhotoCaptureService
+from .camera_stream import CameraStreamServer
 from .serial_conn import SerialConnection
 from .mqtt_client import MQTTClient
 from .sensor_registry import SensorRegistry
+from .operator_registry import OperatorRegistry
 from .topic_router import TopicRouter
 from .cycle_manager import CycleManager
 
@@ -44,6 +47,8 @@ class HydroponicBridgeService:
 
         # ── Sensor registry ───────────────────────────────────
         self._sensors = SensorRegistry(config.get("sensors", []))
+        # ── Operator registry ──────────────────────────────────
+        self._operators = OperatorRegistry(config.get("operators", []))
 
         # ── Serial ───────────────────────────────────────────
         scfg = config["serial"]
@@ -77,14 +82,25 @@ class HydroponicBridgeService:
         pcfg = config.get("photo", {})
         resolution = pcfg.get("resolution", [1280, 720])
         raw_resolution = pcfg.get("raw_resolution", [4608, 2592])
+        scfg = config.get("streaming", {})
+        stream_enabled = bool(scfg.get("enabled", False))
         self._photo = PhotoCaptureService(
             output_dir=pcfg.get("output_dir", "photos"),
             resolution=(int(resolution[0]), int(resolution[1])),
             raw_resolution=(int(raw_resolution[0]), int(raw_resolution[1])),
             warmup_s=float(pcfg.get("warmup_s", 2.0)),
             autofocus=bool(pcfg.get("autofocus", True)),
+            streaming=stream_enabled,
         )
         self._photo_lock = threading.Lock()
+        self._stream_server = (
+            CameraStreamServer(
+                port=int(scfg.get("port", 8000)),
+                photo_dir=pcfg.get("output_dir", "photos"),
+            )
+            if stream_enabled
+            else None
+        )
 
         # ── Register topic handlers ───────────────────────────
         # To add a new inbound topic: call self._router.register() here.
@@ -114,6 +130,14 @@ class HydroponicBridgeService:
             description='Capture a photo: {"time": <delay_s>} → capturedPhoto',
         )
 
+        # ── Operator topics ────────────────────────────────────
+        for op in self._operators.all():
+            self._router.register(
+                f"{op.name}/cmd",
+                functools.partial(self._handle_operator_cmd, op),
+                description=f'Operator {op.name}: {{"id","param":{{...}}}} -> {op.name}/resp',
+            )
+
         # ── Cycle manager ─────────────────────────────────────
         self._cycle_manager = CycleManager(
             cycles_config=config.get("cycles", []),
@@ -138,6 +162,11 @@ class HydroponicBridgeService:
 
         try:
             self._photo.start()
+            if self._stream_server:
+                self._stream_server.start(
+                    self._photo.streaming_output,
+                    self._photo.camera_state,
+                )
             self._serial.start()
             self._mqtt.start()
             self._cycle_manager.start()
@@ -157,6 +186,8 @@ class HydroponicBridgeService:
         self._cycle_manager.stop()
         self._mqtt.stop()
         self._serial.stop()
+        if self._stream_server:
+            self._stream_server.stop()
         self._photo.stop()
         logger.info("Service stopped")
 
@@ -196,6 +227,28 @@ class HydroponicBridgeService:
         self._mqtt.publish_raw(
             f"{self._prefix}/commandResponse",
             json.dumps({"command": command, "response": response, "time": _now_iso()}),
+        )
+
+    def _handle_operator_cmd(self, op, payload: dict):
+        """Handle incoming operator command by dispatching to a thread."""
+        cmd_id = payload.get("id")
+        param = payload.get("param") or {}
+        threading.Thread(
+            target=self._run_operator_cmd,
+            args=(op, cmd_id, param),
+            daemon=True,
+            name=f"op-{op.name}-{cmd_id}",
+        ).start()
+
+    def _run_operator_cmd(self, op, cmd_id, param: dict):
+        try:
+            result = self._operators.execute(op, param, self._serial)
+        except Exception as exc:
+            logger.exception("Operator %s failed", op.name)
+            result = f"ERROR:internal:{exc.__class__.__name__}"
+        self._mqtt.publish_raw(
+            f"{self._prefix}/{op.name}/resp",
+            json.dumps({"id": cmd_id, "response": result}),
         )
 
     def _handle_capture_photo(self, payload: dict):

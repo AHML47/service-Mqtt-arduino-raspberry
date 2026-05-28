@@ -29,6 +29,10 @@ photo:
   warmup_s: 2.0
   autofocus: true
 
+streaming:
+  enabled: false   # set to true to enable MJPEG stream at http://<pi-ip>:<port>
+  port: 8000
+
 logging:
   level: DEBUG
 
@@ -48,7 +52,7 @@ logging:
 cycles:
   - name: tri_hourly_cultivation
     interval: 10800         # 3 hours
-    run_on_start: false      # also runs immediately when the service starts
+    run_on_start: true      # also runs immediately when the service starts
     commands:
       - type: serial
         command: dc1:ON
@@ -69,3 +73,22 @@ cycles:
       - type: serial
         command: dc1:OFF
         publish_response: false
+
+# ── Operators (first-class actuators) ─────────────────────────
+# Define operators that map MQTT-level names to Arduino devices and actions.
+operators:
+  - name: motor1
+    arduino_device: dc1
+    actions:
+      on:
+        command: "{device}:ON"
+        duration_param: duration
+        followup: "{device}:OFF"
+      off:
+        command: "{device}:OFF"
+
+  - name: SN_eb8c133df2
+    arduino_device: step1
+    actions:
+      move:
+        command: "{device}:MOVE:{steps}"
