@@ -7,7 +7,7 @@ call in service.py before start() is called.
 
 Publications (outgoing):
     {prefix}/sensorData       → {"<name>": <value>, "time": "<iso>"}
-    {prefix}/capturedPhoto    → JPEG bytes (binary)
+    {prefix}/{camera}/capturedPhoto → JPEG bytes (binary) for named cameras
     {prefix}/commandResponse  → {"command": "...", "response": "...", "time": "..."}
     {prefix}/pong             → {"status": "online", "time": "..."}
 """
@@ -112,8 +112,8 @@ class MQTTClient:
         self._client.publish(topic, payload, qos=self._qos)
         logger.debug("PUB %s → %s", topic, payload[:120])
 
-    def publish_captured_photo(self, image_bytes: bytes):
-        topic = f"{self._prefix}/capturedPhoto"
+    def publish_captured_photo(self, image_bytes: bytes, camera_name: Optional[str] = None):
+        topic = f"{self._prefix}/{camera_name}/capturedPhoto" if camera_name else f"{self._prefix}/capturedPhoto"
         self._client.publish(topic, image_bytes, qos=self._qos)
         logger.debug("PUB %s → <binary %d bytes>", topic, len(image_bytes))
 

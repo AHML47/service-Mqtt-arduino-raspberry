@@ -29,8 +29,18 @@ photo:
   warmup_s: 2.0
   autofocus: true
 
+# Named cameras. If omitted, the service creates one default camera from
+# the `photo` section above. Use `param.camera` in capturePhoto payloads.
+cameras:
+  - name: SN_6a0a06f04e
+    output_dir: photos
+    resolution: [1280, 720]
+    raw_resolution: [4608, 2592]
+    warmup_s: 2.0
+    autofocus: true
+
 streaming:
-  enabled: false   # set to true to enable MJPEG stream at http://<pi-ip>:<port>
+  enabled: true   # set to true to enable MJPEG stream at http://<pi-ip>:<port>
   port: 8000
 
 logging:
@@ -52,7 +62,7 @@ logging:
 cycles:
   - name: tri_hourly_cultivation
     interval: 10800         # 3 hours
-    run_on_start: true      # also runs immediately when the service starts
+    run_on_start: false      # also runs immediately when the service starts
     commands:
       - type: serial
         command: dc1:ON

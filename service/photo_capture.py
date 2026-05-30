@@ -29,6 +29,7 @@ class PhotoCaptureResult:
 class PhotoCaptureService:
     def __init__(
         self,
+        name: str = "camera1",
         output_dir: str = "photos",
         resolution: Tuple[int, int] = (1280, 720),
         raw_resolution: Tuple[int, int] = (4608, 2592),
@@ -36,6 +37,7 @@ class PhotoCaptureService:
         autofocus: bool = True,
         streaming: bool = False,
     ):
+        self._name = name
         self._output_dir = Path(output_dir)
         self._resolution = resolution
         self._raw_resolution = raw_resolution
@@ -46,6 +48,10 @@ class PhotoCaptureService:
         self._lock = threading.Lock()
         self._streaming_output = None
         self._camera_state = None
+
+    @property
+    def name(self):
+        return self._name
 
     @property
     def streaming_output(self):
@@ -98,7 +104,7 @@ class PhotoCaptureService:
                 except Exception as exc:
                     logger.debug("Continuous autofocus not available: %s", exc)
 
-        logger.info("Camera started (%dx%d, streaming=%s)", *self._resolution, self._streaming)
+        logger.info("Camera '%s' started (%dx%d, streaming=%s)", self._name, *self._resolution, self._streaming)
 
     def stop(self):
         """Stop the camera stream at service shutdown."""
@@ -113,7 +119,7 @@ class PhotoCaptureService:
             self._picam2 = None
         self._streaming_output = None
         self._camera_state = None
-        logger.info("Camera stopped")
+        logger.info("Camera '%s' stopped", self._name)
 
     def capture(self, delay_s: float = 0.0) -> PhotoCaptureResult:
         """Grab a frame from the live stream after an optional delay."""
@@ -125,7 +131,7 @@ class PhotoCaptureService:
 
         self._output_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"photo_{timestamp}.jpg"
+        filename = f"{self._name}_{timestamp}.jpg"
         path = self._output_dir / filename
 
         with self._lock:

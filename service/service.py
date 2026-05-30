@@ -8,7 +8,8 @@ Inbound topics (subscribed):
     readSensor      {"sensor": "<name>"}            → sensorData: {<name>: val, time}
     readAllSensors  {}                              → sensorData (one per sensor)
     command         {"command": "<arduino_cmd>"}    → commandResponse: {command, response, time}
-    capturePhoto    {"time": <delay_s>}             → capturedPhoto: <jpeg bytes>
+    {cameraName}/capturePhoto                         → capturedPhoto: <jpeg bytes>
+                    payload: {"id": ..., "param": {"time": <delay_s>}}
 
 Outbound topics (published):
     sensorData      {"<sensor_name>": <value>, "time": "<iso>"}
@@ -24,10 +25,11 @@ import time
 from datetime import datetime, timezone
 import functools
 
-from .photo_capture import PhotoCaptureError, PhotoCaptureService
+from .photo_capture import PhotoCaptureError
 from .camera_stream import CameraStreamServer
 from .serial_conn import SerialConnection
 from .mqtt_client import MQTTClient
+from .camera_registry import CameraRegistry
 from .sensor_registry import SensorRegistry
 from .operator_registry import OperatorRegistry
 from .topic_router import TopicRouter
@@ -78,21 +80,16 @@ class HydroponicBridgeService:
             connect_retries=mcfg.get("connect_retries", 1),
         )
 
-        # ── Camera ───────────────────────────────────────────
+        # ── Camera registry ───────────────────────────────────
         pcfg = config.get("photo", {})
         resolution = pcfg.get("resolution", [1280, 720])
         raw_resolution = pcfg.get("raw_resolution", [4608, 2592])
         scfg = config.get("streaming", {})
         stream_enabled = bool(scfg.get("enabled", False))
-        self._photo = PhotoCaptureService(
-            output_dir=pcfg.get("output_dir", "photos"),
-            resolution=(int(resolution[0]), int(resolution[1])),
-            raw_resolution=(int(raw_resolution[0]), int(raw_resolution[1])),
-            warmup_s=float(pcfg.get("warmup_s", 2.0)),
-            autofocus=bool(pcfg.get("autofocus", True)),
-            streaming=stream_enabled,
-        )
-        self._photo_lock = threading.Lock()
+        photo_defaults = dict(pcfg)
+        photo_defaults["streaming"] = stream_enabled
+        photo_defaults.setdefault("name", "camera1")
+        self._cameras = CameraRegistry(config.get("cameras", []), photo_defaults)
         self._stream_server = (
             CameraStreamServer(
                 port=int(scfg.get("port", 8000)),
@@ -124,11 +121,20 @@ class HydroponicBridgeService:
             self._handle_command,
             description='Send raw Arduino command: {"command": "<cmd>"} → commandResponse',
         )
-        self._router.register(
-            "capturePhoto",
-            self._handle_capture_photo,
-            description='Capture a photo: {"time": <delay_s>} → capturedPhoto',
-        )
+        default_camera_name = self._cameras.default_name()
+        if default_camera_name:
+            self._router.register(
+                "capturePhoto",
+                functools.partial(self._handle_capture_photo, default_camera_name),
+                description='Legacy capturePhoto for the default camera: {"id":...,"param":{"time":<delay_s>}} → capturedPhoto',
+            )
+
+        for camera in self._cameras.all():
+            self._router.register(
+                f"{camera.name}/capturePhoto",
+                functools.partial(self._handle_capture_photo, camera.name),
+                description=f'Capture photo for camera {camera.name}: {{"id":...,"param":{{"time":<delay_s>}}}} → {camera.name}/capturedPhoto',
+            )
 
         # ── Operator topics ────────────────────────────────────
         for op in self._operators.all():
@@ -161,11 +167,15 @@ class HydroponicBridgeService:
             logger.info(line)
 
         try:
-            self._photo.start()
+            self._cameras.start_all()
             if self._stream_server:
+                primary_name = self._cameras.default_name()
+                primary_camera = self._cameras.get(primary_name) if primary_name else None
+                if primary_camera is None:
+                    raise RuntimeError("No camera configured for streaming")
                 self._stream_server.start(
-                    self._photo.streaming_output,
-                    self._photo.camera_state,
+                    primary_camera.service.streaming_output,
+                    primary_camera.service.camera_state,
                 )
             self._serial.start()
             self._mqtt.start()
@@ -188,7 +198,7 @@ class HydroponicBridgeService:
         self._serial.stop()
         if self._stream_server:
             self._stream_server.stop()
-        self._photo.stop()
+        self._cameras.stop_all()
         logger.info("Service stopped")
 
     # ── Inbound topic handlers ────────────────────────────────
@@ -202,7 +212,8 @@ class HydroponicBridgeService:
 
     def _handle_read_sensor(self, payload: dict):
         """payload: {"sensor": "<name>"} — reads one sensor and publishes to sensorData."""
-        sensor_name = payload.get("sensor", "").strip()
+        params = payload.get("param") or {}
+        sensor_name = (payload.get("sensor") or params.get("sensor") or "").strip()
         if not sensor_name:
             logger.warning("readSensor: payload missing 'sensor' key")
             return
@@ -251,15 +262,16 @@ class HydroponicBridgeService:
             json.dumps({"id": cmd_id, "response": result}),
         )
 
-    def _handle_capture_photo(self, payload: dict):
-        """payload: {"time": <delay_s>} — captures a photo after optional delay."""
-        delay_s = _parse_delay(payload)
-        logger.info("capturePhoto requested; delay=%.3fs", delay_s)
+    def _handle_capture_photo(self, camera_name: str, payload: dict):
+        """payload: {"id": ..., "param": {"time": <delay_s>}} for a named camera route."""
+        params = payload.get("param") if isinstance(payload.get("param"), dict) else None
+        delay_s = _parse_delay(params or payload)
+        logger.info("capturePhoto requested; camera=%s, delay=%.3fs", camera_name, delay_s)
         threading.Thread(
             target=self._capture_and_publish,
-            args=(delay_s,),
+            args=(camera_name, delay_s),
             daemon=True,
-            name="photo-capture",
+            name=f"photo-capture-{camera_name}",
         ).start()
 
     # ── Serial push → MQTT sensorData ─────────────────────────
@@ -273,12 +285,14 @@ class HydroponicBridgeService:
 
     # ── Photo helpers ─────────────────────────────────────────
 
-    def _capture_and_publish(self, delay_s: float):
+    def _capture_and_publish(self, camera_name: str, delay_s: float):
         try:
-            result = self._photo.capture(delay_s=delay_s)
-            with self._photo_lock:
-                self._mqtt.publish_captured_photo(result.content)
-            logger.info("Photo published: %s (%d bytes)", result.filename, len(result.content))
+            result = self._cameras.capture(camera_name, delay_s=delay_s)
+            self._mqtt.publish_captured_photo(
+                result.content,
+                camera_name=camera_name,
+            )
+            logger.info("Photo published from %s: %s (%d bytes)", camera_name, result.filename, len(result.content))
         except PhotoCaptureError as exc:
             logger.error("Photo capture failed: %s", exc)
         except Exception as exc:

@@ -76,8 +76,9 @@ DEFAULT_CONFIG = {
         "warmup_s": 2.0,
         "autofocus": True,
     },
+    "cameras": [],
     "streaming": {
-        "enabled": False,
+        "enabled": True,
         "port": 8000,
     },
     "logging": {
