@@ -153,7 +153,7 @@ class HydroponicBridgeService:
             sensor_registry=self._sensors,
             publish_sensor_data=self._publish_sensor_data,
         )
-        self._cycle_manager.on_capture_photo = lambda: self._capture_and_publish(0.0)
+        self._cycle_manager.on_capture_photo = lambda: self._capture_and_publish("SN_6a0a06f04e", 0.0)
 
     # ── Lifecycle ─────────────────────────────────────────────
 
