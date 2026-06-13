@@ -16,6 +16,7 @@ Outbound topics (published):
     capturedPhoto   <jpeg bytes>
     commandResponse {"command": "...", "response": "...", "time": "..."}
     pong            {"status": "online", "time": "..."}
+    ai/alert        {"image": "<base64-jpeg>", "descreption": "<class: confidence>"}
 """
 
 import json
@@ -24,8 +25,9 @@ import threading
 import time
 from datetime import datetime, timezone
 import functools
+from pathlib import Path
 
-from .photo_capture import PhotoCaptureError
+from .photo_capture import PhotoCaptureError, PhotoCaptureResult
 from .camera_stream import CameraStreamServer
 from .serial_conn import SerialConnection
 from .mqtt_client import MQTTClient
@@ -34,6 +36,7 @@ from .sensor_registry import SensorRegistry
 from .operator_registry import OperatorRegistry
 from .topic_router import TopicRouter
 from .cycle_manager import CycleManager
+from .ai_inference import PlantDiseaseDES
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +82,23 @@ class HydroponicBridgeService:
             connect_timeout=mcfg.get("connect_timeout", 30),
             connect_retries=mcfg.get("connect_retries", 1),
         )
+
+        # ── Local ONNX AI inference ──────────────────────────────
+        acfg = config.get("ai", {})
+        self._ai = None
+        self._ai_enabled = bool(acfg.get("enabled", False))
+        if self._ai_enabled:
+            try:
+                self._ai = PlantDiseaseDES(
+                    models_dir=Path(acfg.get("models_dir", "onnx_raspberry_pi")),
+                    cpu_threads=int(acfg.get("threads", 4)),
+                )
+            except Exception:
+                logger.exception("Failed to initialize local ONNX AI pipeline")
+                if bool(acfg.get("required", True)):
+                    raise
+                logger.warning("Continuing with AI detection disabled")
+                self._ai_enabled = False
 
         # ── Camera registry ───────────────────────────────────
         pcfg = config.get("photo", {})
@@ -176,6 +196,7 @@ class HydroponicBridgeService:
                 self._stream_server.start(
                     primary_camera.service.streaming_output,
                     primary_camera.service.camera_state,
+                    on_capture=self._handle_stream_capture,
                 )
             self._serial.start()
             self._mqtt.start()
@@ -293,10 +314,55 @@ class HydroponicBridgeService:
                 camera_name=camera_name,
             )
             logger.info("Photo published from %s: %s (%d bytes)", camera_name, result.filename, len(result.content))
+            self._analyse_and_publish_ai_alert(result)
         except PhotoCaptureError as exc:
             logger.error("Photo capture failed: %s", exc)
         except Exception as exc:
             logger.exception("Unexpected photo capture error: %s", exc)
+
+    def _handle_stream_capture(self, path: str, filename: str):
+        """Publish and analyse a snapshot captured from the browser stream page."""
+        try:
+            image_path = Path(path)
+            image_bytes = image_path.read_bytes()
+            camera_name = self._cameras.default_name()
+            result = PhotoCaptureResult(
+                path=image_path,
+                filename=filename,
+                content=image_bytes,
+                captured_at=_now_iso(),
+            )
+            self._mqtt.publish_captured_photo(image_bytes, camera_name=camera_name)
+            logger.info(
+                "Stream photo published from %s: %s (%d bytes)",
+                camera_name,
+                filename,
+                len(image_bytes),
+            )
+            self._analyse_and_publish_ai_alert(result)
+        except Exception as exc:
+            logger.exception("Stream photo publish / AI analysis failed: %s", exc)
+
+    def _analyse_and_publish_ai_alert(self, photo_result):
+        """Run local ONNX inference for a captured image and publish its alert."""
+        if not self._ai_enabled or self._ai is None:
+            logger.debug("AI detection disabled; skipping %s", photo_result.filename)
+            return
+
+        try:
+            detection = self._ai.classify(photo_result.path)
+            self._mqtt.publish_ai_alert(
+                image_bytes=photo_result.content,
+                description=detection["description"],
+            )
+            logger.info(
+                "AI detection: %s via %s in %.3fs",
+                detection["description"],
+                detection["selected_expert_name"],
+                detection["timings"]["total_seconds"],
+            )
+        except Exception as exc:
+            logger.exception("AI detection failed for %s: %s", photo_result.filename, exc)
 
 
 # ── Utilities ─────────────────────────────────────────────────

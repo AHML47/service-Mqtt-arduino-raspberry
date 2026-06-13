@@ -56,10 +56,10 @@ DEFAULT_CONFIG = {
     },
     "mqtt": {
         "host": "165.232.139.240",
-        "port": 1885,
+        "port": 1883,
         "username": "backend",
         "password": "backend",
-        "client_id": "hydroponic-bridge",
+        "client_id": "hydroponic-bridge-rraspi",
         # Overridden at runtime by CONNECTION_STRING + ZONE_NAME env vars → hydroponic/{conn}/{zone}
         "topic_prefix": "hydroponic/default/default",
         # When true, unsolicited Arduino push lines are forwarded to sensorData
@@ -81,6 +81,12 @@ DEFAULT_CONFIG = {
         "enabled": True,
         "port": 8000,
     },
+    "ai": {
+        "enabled": False,
+        "required": False,
+        "models_dir": "onnx_raspberry_pi",
+        "threads": 4,
+    },
     "logging": {
         "level": "DEBUG",
     },
@@ -90,7 +96,7 @@ DEFAULT_CONFIG = {
     # Add new sensors here or override in config.yaml.
     "sensors": [
         {
-            "name": "SN_18d79c7303",
+            "name": "SN_1d6c305bf4",
             "arduino_device": "temperature",
             "field_index": 0,
             "command": "temperature:TEMP",

@@ -12,6 +12,7 @@ from datetime import datetime
 from http import server
 from threading import Condition
 from urllib.parse import urlparse, parse_qs
+from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -265,6 +266,16 @@ class _StreamingHandler(server.BaseHTTPRequestHandler):
             req.save("main", path)
             req.release()
             logger.info("Stream capture saved: %s", path)
+
+            on_capture = getattr(self.server, "on_capture", None)
+            if on_capture:
+                threading.Thread(
+                    target=on_capture,
+                    args=(path, filename),
+                    daemon=True,
+                    name="stream-capture-publish",
+                ).start()
+
             return filename
         except Exception as exc:
             logger.error("Stream capture failed: %s", exc)
@@ -288,11 +299,17 @@ class CameraStreamServer:
         self._server: _StreamingHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
-    def start(self, streaming_output: StreamingOutput, camera_state: CameraState) -> None:
+    def start(
+        self,
+        streaming_output: StreamingOutput,
+        camera_state: CameraState,
+        on_capture: Optional[Callable[[str, str], None]] = None,
+    ) -> None:
         srv = _StreamingHTTPServer(("", self._port), _StreamingHandler)
         srv.streaming_output = streaming_output
         srv.camera_state = camera_state
         srv.photo_dir = self._photo_dir
+        srv.on_capture = on_capture
         self._server = srv
         self._thread = threading.Thread(
             target=srv.serve_forever,

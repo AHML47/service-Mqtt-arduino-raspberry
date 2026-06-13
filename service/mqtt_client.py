@@ -10,9 +10,11 @@ Publications (outgoing):
     {prefix}/{camera}/capturedPhoto → JPEG bytes (binary) for named cameras
     {prefix}/commandResponse  → {"command": "...", "response": "...", "time": "..."}
     {prefix}/pong             → {"status": "online", "time": "..."}
+    {prefix}/ai/alert         → {"image": "<base64-jpeg>", "descreption": "<class: confidence>"}
 """
 
 import ast
+import base64
 import json
 import logging
 import time
@@ -116,6 +118,30 @@ class MQTTClient:
         topic = f"{self._prefix}/{camera_name}/capturedPhoto" if camera_name else f"{self._prefix}/capturedPhoto"
         self._client.publish(topic, image_bytes, qos=self._qos)
         logger.debug("PUB %s → <binary %d bytes>", topic, len(image_bytes))
+
+    def publish_ai_alert(self, image_bytes: bytes, description: str):
+        """Publish an AI detection alert to {prefix}/ai/alert.
+
+        JSON cannot contain raw bytes, so the JPEG is encoded as a Base64 string.
+        The payload intentionally uses the key `descreption` to match the
+        requested backend contract.
+        """
+        topic = f"{self._prefix}/ai/alert"
+        payload = json.dumps(
+            {
+                "image": base64.b64encode(image_bytes).decode("ascii"),
+                "descreption": description,
+            },
+            separators=(",", ":"),
+        )
+        self._client.publish(topic, payload, qos=self._qos)
+        logger.info(
+            "PUB %s → AI alert (%d JPEG bytes, %d JSON bytes): %s",
+            topic,
+            len(image_bytes),
+            len(payload),
+            description,
+        )
 
     def publish_raw(self, topic: str, payload: str):
         """Publish a raw string payload to an explicit topic (absolute path)."""

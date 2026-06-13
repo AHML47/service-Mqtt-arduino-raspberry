@@ -11,11 +11,11 @@ serial:
 
 mqtt:
   host: 165.232.139.240
-  port: 1885
+  port: 1883
   username: backend
   password: backend
-  client_id: hydroponic-bridge
-  publish_sensor_data: false
+  client_id: hydroponic-bridge-raspi
+  publish_sensor_data: true
   # topic_prefix is set automatically from CONNECTION_STRING env var.
   # Override here only if not using the env var.
   topic_prefix: hydroponic/default
@@ -53,6 +53,9 @@ logging:
 # Command types:
 #   serial  → send command to Arduino; set publish_response: true to push
 #             the OK: result to the sensorData MQTT topic.
+#   sensor  → read sensors by name (each with its own command/field_index)
+#             and publish every value to sensorData. Omit `sensors` to read
+#             all registered sensors. Requires publish_sensor_data: true.
 #   photo   → capture and publish a photo (uses the camera module).
 #   mqtt    → publish a raw payload to any topic; use {prefix} as a
 #             placeholder for the configured topic_prefix.
@@ -60,6 +63,16 @@ logging:
 # delay_after: N  → wait N seconds after this command before the next one.
 
 cycles:
+  # Continuously publish DHT data (temperature + humidity) every 60s.
+  - name: dht_publish
+    interval: 60
+    run_on_start: true
+    commands:
+      - type: sensor
+        sensors:
+          - SN_1d6c305bf4   # temperature (temperature:TEMP)
+          - SN_0093d96dfb   # humidity    (temperature:HUM)
+
   - name: tri_hourly_cultivation
     interval: 10800         # 3 hours
     run_on_start: true      # also runs immediately when the service starts

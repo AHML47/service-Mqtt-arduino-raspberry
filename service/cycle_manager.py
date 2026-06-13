@@ -130,6 +130,9 @@ class CycleManager:
             if cmd.get("publish_response", False):
                 self._publish_serial_response(command, response)
 
+        elif cmd_type == "sensor":
+            self._read_and_publish_sensors(cmd.get("sensors"))
+
         elif cmd_type == "mqtt":
             topic = cmd.get("topic", "").replace("{prefix}", self._prefix)
             payload = cmd.get("payload", "")
@@ -158,6 +161,36 @@ class CycleManager:
 
         else:
             logger.warning("Cycle: unknown command type '%s'", cmd_type)
+
+    # ── Sensor read → MQTT sensorData ────────────────────────
+
+    def _read_and_publish_sensors(self, names: Optional[list]):
+        """Read sensors by their own command/field_index and publish each value.
+
+        names: list of sensor names to read, or None/empty to read all.
+        Each sensor is read with its own command, so sensors sharing an Arduino
+        device (e.g. DHT temperature + humidity) map correctly — unlike the
+        device-based parse_push() path used by publish_response.
+        """
+        if not self._publish_sensor_data:
+            logger.debug("Cycle: sensorData publishing disabled; skipping sensor read")
+            return
+
+        if names:
+            sensors = []
+            for name in names:
+                sensor = self._sensor_registry.get(name)
+                if sensor is None:
+                    logger.warning("Cycle: unknown sensor '%s'", name)
+                    continue
+                sensors.append(sensor)
+        else:
+            sensors = self._sensor_registry.all()
+
+        for sensor in sensors:
+            value = self._sensor_registry.read_sensor(sensor.name, self._serial)
+            if value is not None:
+                self._mqtt.publish_sensor_data(sensor.name, value)
 
     # ── Serial response → MQTT sensorData ────────────────────
 
