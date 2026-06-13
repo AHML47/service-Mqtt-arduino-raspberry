@@ -1,45 +1,59 @@
 """
-ArduinoBridgeService — the central coordinator.
+HydroponicBridgeService — orchestrates serial, MQTT, camera, and cycles.
 
-Wires together:
-    SerialConnection  ↔  Arduino hardware
-    MQTTClient        ↔  MQTT broker
-    TimerManager      ↔  scheduled commands
+Topic structure:  /hydroponic/{connectionString}/{suffix}
 
-Data flow:
+Inbound topics (subscribed):
+    ping            {}                              → pong: {status, time}
+    readSensor      {"sensor": "<name>"}            → sensorData: {<name>: val, time}
+    readAllSensors  {}                              → sensorData (one per sensor)
+    command         {"command": "<arduino_cmd>"}    → commandResponse: {command, response, time}
+    {cameraName}/capturePhoto                         → capturedPhoto: <jpeg bytes>
+                    payload: {"id": ..., "param": {"time": <delay_s>}}
 
-    MQTT cmd topic  →  SerialConnection.send()  →  Arduino
-                                                      ↓
-    MQTT resp topic ←  response parsing          ←  response
-
-    TimerManager fires  →  SerialConnection.send()  →  Arduino
-                                                          ↓
-    MQTT publish_to     ←  parsed value              ←  response
-
-    Arduino push (unsolicited)  →  parse  →  MQTT push/{device}
+Outbound topics (published):
+    sensorData      {"<sensor_name>": <value>, "time": "<iso>"}
+    capturedPhoto   <jpeg bytes>
+    commandResponse {"command": "...", "response": "...", "time": "..."}
+    pong            {"status": "online", "time": "..."}
+    ai/alert        {"image": "<base64-jpeg>", "descreption": "<class: confidence>"}
 """
 
+import json
 import logging
+import threading
 import time
 from datetime import datetime, timezone
-from typing import Optional
+import functools
+from pathlib import Path
 
+from .photo_capture import PhotoCaptureError, PhotoCaptureResult
+from .camera_stream import CameraStreamServer
 from .serial_conn import SerialConnection
 from .mqtt_client import MQTTClient
-from .timer_manager import TimerManager, TimerEntry
-from .parsers import parse_response, extract_value, parse_dht_push
+from .camera_registry import CameraRegistry
+from .sensor_registry import SensorRegistry
+from .operator_registry import OperatorRegistry
+from .topic_router import TopicRouter
+from .cycle_manager import CycleManager
+from .ai_inference import PlantDiseaseDES
 
 logger = logging.getLogger(__name__)
 
 
-class ArduinoBridgeService:
-    """
-    Top-level service. Instantiate with a config dict, call run().
-    """
-
+class HydroponicBridgeService:
     def __init__(self, config: dict):
         self._config = config
         self._running = False
+
+        mcfg = config["mqtt"]
+        self._prefix = mcfg.get("topic_prefix", "hydroponic/default")
+        self._publish_sensor_data = bool(mcfg.get("publish_sensor_data", False))
+
+        # ── Sensor registry ───────────────────────────────────
+        self._sensors = SensorRegistry(config.get("sensors", []))
+        # ── Operator registry ──────────────────────────────────
+        self._operators = OperatorRegistry(config.get("operators", []))
 
         # ── Serial ───────────────────────────────────────────
         scfg = config["serial"]
@@ -51,53 +65,146 @@ class ArduinoBridgeService:
         )
         self._serial.on_push = self._handle_push
 
+        # ── Topic router ─────────────────────────────────────
+        self._router = TopicRouter()
+
         # ── MQTT ─────────────────────────────────────────────
-        mcfg = config["mqtt"]
         self._mqtt = MQTTClient(
             host=mcfg["host"],
             port=mcfg["port"],
+            router=self._router,
             username=mcfg.get("username"),
             password=mcfg.get("password"),
-            client_id=mcfg.get("client_id", "arduino-bridge"),
-            topic_prefix=mcfg.get("topic_prefix", "arduino"),
+            client_id=mcfg.get("client_id", "hydroponic-bridge"),
+            topic_prefix=self._prefix,
             qos=mcfg.get("qos", 1),
             keepalive=mcfg.get("keepalive", 60),
             connect_timeout=mcfg.get("connect_timeout", 30),
             connect_retries=mcfg.get("connect_retries", 1),
         )
-        self._mqtt.on_command = self._handle_mqtt_command
-        self._mqtt.on_timer_set = self._handle_timer_set
-        self._mqtt.on_timer_delete = self._handle_timer_delete
-        self._mqtt.on_timer_list = self._handle_timer_list
 
-        # ── Timers ───────────────────────────────────────────
-        tcfg = config.get("timers", {})
-        self._timers = TimerManager(
-            persist_file=tcfg.get("persist_file", "timers.json"),
+        # ── Local ONNX AI inference ──────────────────────────────
+        acfg = config.get("ai", {})
+        self._ai = None
+        self._ai_enabled = bool(acfg.get("enabled", False))
+        if self._ai_enabled:
+            try:
+                self._ai = PlantDiseaseDES(
+                    models_dir=Path(acfg.get("models_dir", "onnx_raspberry_pi")),
+                    cpu_threads=int(acfg.get("threads", 4)),
+                )
+            except Exception:
+                logger.exception("Failed to initialize local ONNX AI pipeline")
+                if bool(acfg.get("required", True)):
+                    raise
+                logger.warning("Continuing with AI detection disabled")
+                self._ai_enabled = False
+
+        # ── Camera registry ───────────────────────────────────
+        pcfg = config.get("photo", {})
+        resolution = pcfg.get("resolution", [1280, 720])
+        raw_resolution = pcfg.get("raw_resolution", [4608, 2592])
+        scfg = config.get("streaming", {})
+        stream_enabled = bool(scfg.get("enabled", False))
+        photo_defaults = dict(pcfg)
+        photo_defaults["streaming"] = stream_enabled
+        photo_defaults.setdefault("name", "camera1")
+        self._cameras = CameraRegistry(config.get("cameras", []), photo_defaults)
+        self._stream_server = (
+            CameraStreamServer(
+                port=int(scfg.get("port", 8000)),
+                photo_dir=pcfg.get("output_dir", "photos"),
+            )
+            if stream_enabled
+            else None
         )
-        self._timers.on_fire = self._handle_timer_fire
-        self._timer_defaults = tcfg.get("defaults", [])
 
-    # ── Lifecycle ────────────────────────────────────────────
+        # ── Register topic handlers ───────────────────────────
+        # To add a new inbound topic: call self._router.register() here.
+        self._router.register(
+            "ping",
+            self._handle_ping,
+            description="Connection check: {} → pong/{status,time}",
+        )
+        self._router.register(
+            "readSensor",
+            self._handle_read_sensor,
+            description='Read one sensor: {"sensor": "<name>"} → sensorData',
+        )
+        self._router.register(
+            "readAllSensors",
+            self._handle_read_all_sensors,
+            description="Read all sensors: {} → sensorData (one message per sensor)",
+        )
+        self._router.register(
+            "command",
+            self._handle_command,
+            description='Send raw Arduino command: {"command": "<cmd>"} → commandResponse',
+        )
+        default_camera_name = self._cameras.default_name()
+        if default_camera_name:
+            self._router.register(
+                "capturePhoto",
+                functools.partial(self._handle_capture_photo, default_camera_name),
+                description='Legacy capturePhoto for the default camera: {"id":...,"param":{"time":<delay_s>}} → capturedPhoto',
+            )
+
+        for camera in self._cameras.all():
+            self._router.register(
+                f"{camera.name}/capturePhoto",
+                functools.partial(self._handle_capture_photo, camera.name),
+                description=f'Capture photo for camera {camera.name}: {{"id":...,"param":{{"time":<delay_s>}}}} → {camera.name}/capturedPhoto',
+            )
+
+        # ── Operator topics ────────────────────────────────────
+        for op in self._operators.all():
+            self._router.register(
+                f"{op.name}/cmd",
+                functools.partial(self._handle_operator_cmd, op),
+                description=f'Operator {op.name}: {{"id","param":{{...}}}} -> {op.name}/resp',
+            )
+
+        # ── Cycle manager ─────────────────────────────────────
+        self._cycle_manager = CycleManager(
+            cycles_config=config.get("cycles", []),
+            serial=self._serial,
+            mqtt=self._mqtt,
+            topic_prefix=self._prefix,
+            sensor_registry=self._sensors,
+            publish_sensor_data=self._publish_sensor_data,
+        )
+        self._cycle_manager.on_capture_photo = lambda: self._capture_and_publish("SN_6a0a06f04e", 0.0)
+
+    # ── Lifecycle ─────────────────────────────────────────────
 
     def run(self):
-        """Start all subsystems and block until interrupted."""
         logger.info("=" * 50)
-        logger.info("  Arduino Bridge Service starting")
+        logger.info("  Hydroponic Bridge Service starting")
         logger.info("=" * 50)
+        logger.info("Topic prefix: %s", self._prefix)
+        logger.info("Registered inbound topics:")
+        for line in self._router.describe():
+            logger.info(line)
 
         try:
+            self._cameras.start_all()
+            if self._stream_server:
+                primary_name = self._cameras.default_name()
+                primary_camera = self._cameras.get(primary_name) if primary_name else None
+                if primary_camera is None:
+                    raise RuntimeError("No camera configured for streaming")
+                self._stream_server.start(
+                    primary_camera.service.streaming_output,
+                    primary_camera.service.camera_state,
+                    on_capture=self._handle_stream_capture,
+                )
             self._serial.start()
             self._mqtt.start()
-            self._timers.load_defaults(self._timer_defaults)
-            self._timers.start()
-
+            self._cycle_manager.start()
             self._running = True
             logger.info("Service is running. Press Ctrl+C to stop.")
-
             while self._running:
                 time.sleep(1)
-
         except KeyboardInterrupt:
             logger.info("Shutdown requested")
         except Exception as e:
@@ -107,132 +214,178 @@ class ArduinoBridgeService:
 
     def _shutdown(self):
         self._running = False
-        self._timers.stop()
+        self._cycle_manager.stop()
         self._mqtt.stop()
         self._serial.stop()
+        if self._stream_server:
+            self._stream_server.stop()
+        self._cameras.stop_all()
         logger.info("Service stopped")
 
-    # ── MQTT → Arduino (command passthrough) ─────────────────
+    # ── Inbound topic handlers ────────────────────────────────
 
-    def _handle_mqtt_command(self, command: str):
-        """
-        Received a raw command from MQTT (e.g. "dht1:READ").
-        Forward it to Arduino and publish the response.
-        """
-        logger.info("MQTT cmd: %s", command)
+    def _handle_ping(self, _payload: dict):
+        """payload: {} — responds with online status."""
+        self._mqtt.publish_raw(
+            f"{self._prefix}/pong",
+            json.dumps({"status": "online", "time": _now_iso()}),
+        )
+
+    def _handle_read_sensor(self, payload: dict):
+        """payload: {"sensor": "<name>"} — reads one sensor and publishes to sensorData."""
+        params = payload.get("param") or {}
+        sensor_name = (payload.get("sensor") or params.get("sensor") or "").strip()
+        if not sensor_name:
+            logger.warning("readSensor: payload missing 'sensor' key")
+            return
+        value = self._sensors.read_sensor(sensor_name, self._serial)
+        if value is not None:
+            self._mqtt.publish_sensor_data(sensor_name, value)
+
+    def _handle_read_all_sensors(self, _payload: dict):
+        """payload: {} — reads every registered sensor and publishes each to sensorData."""
+        for sensor in self._sensors.all():
+            value = self._sensors.read_sensor(sensor.name, self._serial)
+            if value is not None:
+                self._mqtt.publish_sensor_data(sensor.name, value)
+
+    def _handle_command(self, payload: dict):
+        """payload: {"command": "<arduino_cmd>"} — forwards command and publishes response."""
+        command = payload.get("command", "").strip()
+        if not command:
+            logger.warning("command: payload missing 'command' key")
+            return
         response = self._serial.send(command)
+        self._mqtt.publish_raw(
+            f"{self._prefix}/commandResponse",
+            json.dumps({"command": command, "response": response, "time": _now_iso()}),
+        )
 
-        self._mqtt.publish("resp", {
-            "cmd": command,
-            "resp": response,
-            "time": _now_iso(),
-        })
+    def _handle_operator_cmd(self, op, payload: dict):
+        """Handle incoming operator command by dispatching to a thread."""
+        cmd_id = payload.get("id")
+        param = payload.get("param") or {}
+        threading.Thread(
+            target=self._run_operator_cmd,
+            args=(op, cmd_id, param),
+            daemon=True,
+            name=f"op-{op.name}-{cmd_id}",
+        ).start()
 
-    # ── Arduino → MQTT (unsolicited push) ────────────────────
+    def _run_operator_cmd(self, op, cmd_id, param: dict):
+        try:
+            result = self._operators.execute(op, param, self._serial)
+        except Exception as exc:
+            logger.exception("Operator %s failed", op.name)
+            result = f"ERROR:internal:{exc.__class__.__name__}"
+        self._mqtt.publish_raw(
+            f"{self._prefix}/{op.name}/resp",
+            json.dumps({"id": cmd_id, "response": result}),
+        )
+
+    def _handle_capture_photo(self, camera_name: str, payload: dict):
+        """payload: {"id": ..., "param": {"time": <delay_s>}} for a named camera route."""
+        params = payload.get("param") if isinstance(payload.get("param"), dict) else None
+        delay_s = _parse_delay(params or payload)
+        logger.info("capturePhoto requested; camera=%s, delay=%.3fs", camera_name, delay_s)
+        threading.Thread(
+            target=self._capture_and_publish,
+            args=(camera_name, delay_s),
+            daemon=True,
+            name=f"photo-capture-{camera_name}",
+        ).start()
+
+    # ── Serial push → MQTT sensorData ─────────────────────────
 
     def _handle_push(self, device: str, payload: str):
-        """
-        Arduino sent an unsolicited line like "dht1:OK:24.5:55.0".
-        Parse it and publish to appropriate MQTT topics.
-        """
-        self._mqtt.publish(f"push/{device}", {
-            "value": payload,
-            "time": _now_iso(),
-        })
+        """Receive unsolicited Arduino push, map via registry, publish to sensorData."""
+        if not self._publish_sensor_data:
+            return
+        for sensor_name, value in self._sensors.parse_push(device, payload):
+            self._mqtt.publish_sensor_data(sensor_name, value)
 
-        # Special handling for DHT pushes → split into temp/humidity topics
-        if device.startswith("dht"):
-            parsed = parse_dht_push(payload)
-            if parsed:
-                # Publish sensor data under the unified `sensorData` topic as
-                # { "sensor name": value } per requested format.
-                self._mqtt.publish("sensorData", {
-                    "temperature": parsed["temperature"],
-                })
-                self._mqtt.publish("sensorData", {
-                    "humidity": parsed["humidity"],
-                })
+    # ── Photo helpers ─────────────────────────────────────────
 
-    # ── Timer fire → Arduino → MQTT ─────────────────────────
-
-    def _handle_timer_fire(
-        self,
-        timer_id: str,
-        command: str,
-        publish_to: Optional[str],
-        parse_mode: Optional[str],
-    ):
-        """A timer triggered — send the command and publish the result."""
-        logger.debug("Timer [%s] firing: %s", timer_id, command)
-        response = self._serial.send(command)
-
-        status, _ = parse_response(response)
-        value = extract_value(response, parse_mode)
-
-        # Publish to the timer's custom topic (or default resp topic)
-        result_payload = {
-            "timer": timer_id,
-            "cmd": command,
-            "resp": response,
-            "value": value,
-            "time": _now_iso(),
-        }
-
-        if publish_to:
-            # Normalize publish_to so it uses the current MQTT prefix.
-            topic = publish_to
-            prefix = self._mqtt._prefix
-            if topic.startswith(prefix + "/"):
-                final_topic = topic
-            elif topic.startswith("arduino/"):
-                # Replace legacy 'arduino' prefix with the current prefix
-                final_topic = prefix + topic[len("arduino"):]
-            else:
-                # Treat as relative and prefix it
-                final_topic = f"{prefix}/{topic.lstrip('/') }"
-
-            self._mqtt.publish_raw(final_topic, result_payload)
-        else:
-            self._mqtt.publish("resp", result_payload)
-
-    # ── Timer CRUD via MQTT ──────────────────────────────────
-
-    def _handle_timer_set(self, data: dict):
-        """Create or update a timer from MQTT payload."""
+    def _capture_and_publish(self, camera_name: str, delay_s: float):
         try:
-            entry = TimerEntry.from_dict(data)
-            self._timers.set_timer(entry)
-            self._mqtt.publish("timer/status", {
-                "action": "set",
-                "timer": entry.to_dict(),
-                "time": _now_iso(),
-            })
-        except (KeyError, TypeError) as e:
-            logger.error("Invalid timer payload: %s — %s", data, e)
-            self._mqtt.publish("timer/status", {
-                "error": f"invalid payload: {e}",
-                "time": _now_iso(),
-            })
+            result = self._cameras.capture(camera_name, delay_s=delay_s)
+            self._mqtt.publish_captured_photo(
+                result.content,
+                camera_name=camera_name,
+            )
+            logger.info("Photo published from %s: %s (%d bytes)", camera_name, result.filename, len(result.content))
+            self._analyse_and_publish_ai_alert(result)
+        except PhotoCaptureError as exc:
+            logger.error("Photo capture failed: %s", exc)
+        except Exception as exc:
+            logger.exception("Unexpected photo capture error: %s", exc)
 
-    def _handle_timer_delete(self, timer_id: str):
-        """Delete a timer by id."""
-        success = self._timers.delete_timer(timer_id)
-        self._mqtt.publish("timer/status", {
-            "action": "delete",
-            "id": timer_id,
-            "success": success,
-            "time": _now_iso(),
-        })
+    def _handle_stream_capture(self, path: str, filename: str):
+        """Publish and analyse a snapshot captured from the browser stream page."""
+        try:
+            image_path = Path(path)
+            image_bytes = image_path.read_bytes()
+            camera_name = self._cameras.default_name()
+            result = PhotoCaptureResult(
+                path=image_path,
+                filename=filename,
+                content=image_bytes,
+                captured_at=_now_iso(),
+            )
+            self._mqtt.publish_captured_photo(image_bytes, camera_name=camera_name)
+            logger.info(
+                "Stream photo published from %s: %s (%d bytes)",
+                camera_name,
+                filename,
+                len(image_bytes),
+            )
+            self._analyse_and_publish_ai_alert(result)
+        except Exception as exc:
+            logger.exception("Stream photo publish / AI analysis failed: %s", exc)
 
-    def _handle_timer_list(self):
-        """Publish the full list of active timers."""
-        timers = self._timers.list_timers()
-        self._mqtt.publish("timer/status", {
-            "action": "list",
-            "timers": timers,
-            "time": _now_iso(),
-        })
+    def _analyse_and_publish_ai_alert(self, photo_result):
+        """Run local ONNX inference for a captured image and publish its alert."""
+        if not self._ai_enabled or self._ai is None:
+            logger.debug("AI detection disabled; skipping %s", photo_result.filename)
+            return
 
+        try:
+            detection = self._ai.classify(photo_result.path)
+            self._mqtt.publish_ai_alert(
+                image_bytes=photo_result.content,
+                description=detection["description"],
+            )
+            logger.info(
+                "AI detection: %s via %s in %.3fs",
+                detection["description"],
+                detection["selected_expert_name"],
+                detection["timings"]["total_seconds"],
+            )
+        except Exception as exc:
+            logger.exception("AI detection failed for %s: %s", photo_result.filename, exc)
+
+
+# ── Utilities ─────────────────────────────────────────────────
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_delay(data: dict) -> float:
+    raw = data.get("time", 0)
+    if raw is None or raw == "":
+        return 0.0
+    if isinstance(raw, (int, float)):
+        return max(0.0, float(raw))
+    if isinstance(raw, str):
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            pass
+        try:
+            target = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            now = datetime.now(target.tzinfo or timezone.utc)
+            return max(0.0, (target - now).total_seconds())
+        except ValueError:
+            pass
+    return 0.0

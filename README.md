@@ -30,8 +30,10 @@ MQTT Broker
 | Topic                          | Dir | Payload                          | Description                    |
 |--------------------------------|-----|----------------------------------|--------------------------------|
 | `arduino/cmd`                  | IN  | `device:action:param1:param2`    | Send raw command to Arduino    |
+| `arduino/captureorder`         | IN  | `{"time":5}` or ISO timestamp   | Schedule a photo capture       |
 | `arduino/resp`                 | OUT | `{"cmd":"...","resp":"...","time"}` | Command response               |
 | `arduino/push/{device}`        | OUT | `{"value":"...","time"}`     | Unsolicited Arduino push data  |
+| `arduino/photo`                | OUT | JPEG bytes                       | Captured photo payload          |
 | `arduino/sensor/temperature`   | OUT | `{"value":24.5,"time"}`      | Parsed temperature reading     |
 | `arduino/sensor/humidity`      | OUT | `{"value":55.0,"time"}`      | Parsed humidity reading        |
 | `arduino/timer/set`            | IN  | JSON (see below)                 | Create / update a timer        |
@@ -70,6 +72,9 @@ nano service/config.yaml
 # Install as systemd service (creates venv, installs deps, enables + starts service)
 chmod +x install_service.sh uninstall_service.sh
 sudo ./install_service.sh
+
+# Camera capture requires Picamera2 on the Raspberry Pi
+# (usually installed as part of the Pi camera stack).
 
 # Check status and logs
 sudo systemctl status arduino-bridge

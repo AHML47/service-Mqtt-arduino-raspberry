@@ -1,51 +1,43 @@
 """
-MQTT Client — connects to the broker, subscribes to control topics,
-and publishes sensor data / responses.
+MQTT client for the hydroponic bridge.
+
+Inbound topics are dispatched through a TopicRouter — no handlers are
+hardcoded here. Registering a new topic requires only a router.register()
+call in service.py before start() is called.
+
+Publications (outgoing):
+    {prefix}/sensorData       → {"<name>": <value>, "time": "<iso>"}
+    {prefix}/{camera}/capturedPhoto → JPEG bytes (binary) for named cameras
+    {prefix}/commandResponse  → {"command": "...", "response": "...", "time": "..."}
+    {prefix}/pong             → {"status": "online", "time": "..."}
+    {prefix}/ai/alert         → {"image": "<base64-jpeg>", "descreption": "<class: confidence>"}
 """
 
+import ast
+import base64
 import json
 import logging
 import time
-from typing import Callable, Optional
 from datetime import datetime, timezone
+from typing import Optional
 
 import paho.mqtt.client as mqtt
 
-logger = logging.getLogger(__name__)
+from .topic_router import TopicRouter
 
-# Callback types
-CommandCallback = Callable[[str], None]             # raw Arduino command string
-TimerSetCallback = Callable[[dict], None]            # timer JSON payload
-TimerDeleteCallback = Callable[[str], None]          # timer id
-TimerListCallback = Callable[[], None]               # no args
+logger = logging.getLogger(__name__)
 
 
 class MQTTClient:
-    """
-    Thin wrapper around paho-mqtt tailored to the Arduino bridge topics.
-
-    Subscriptions (relative to prefix):
-        {prefix}/cmd          → forward to Arduino
-        {prefix}/timer/set    → create/update timer
-        {prefix}/timer/delete → delete timer
-        {prefix}/timer/list   → request timer list
-
-    Publications:
-        {prefix}/resp         → command responses
-        {prefix}/push/{dev}   → unsolicited Arduino pushes
-        {prefix}/sensor/*     → parsed sensor values
-        {prefix}/timer/status → timer list dump
-        {prefix}/status       → online / offline (LWT)
-    """
-
     def __init__(
         self,
-        host: str = "165.232.139.240",
-        port: int = 1883,
+        host: str,
+        port: int,
+        router: TopicRouter,
         username: Optional[str] = None,
         password: Optional[str] = None,
-        client_id: str = "arduino-bridge",
-        topic_prefix: str = "arduino",
+        client_id: str = "hydroponic-bridge",
+        topic_prefix: str = "hydroponic/default",
         qos: int = 1,
         keepalive: int = 60,
         connect_timeout: int = 30,
@@ -53,11 +45,13 @@ class MQTTClient:
     ):
         self._host = host
         self._port = port
+        self._router = router
         self._prefix = topic_prefix
         self._qos = qos
         self._keepalive = keepalive
         self._connect_timeout = connect_timeout
         self._connect_retries = connect_retries
+        self._connected = False
 
         self._client = mqtt.Client(
             client_id=client_id,
@@ -66,31 +60,13 @@ class MQTTClient:
         if username:
             self._client.username_pw_set(username, password)
 
-        # Last Will — broker publishes this if we drop unexpectedly
-        self._client.will_set(
-            f"{self._prefix}/status",
-            payload=json.dumps({"state": "offline"}),
-            qos=1,
-            retain=True,
-        )
-
         self._client.on_connect = self._on_connect
         self._client.on_message = self._on_message
-
-        # Connection state
-        self._connected = False
-
-        # External callbacks — set by the service
-        self.on_command: Optional[CommandCallback] = None
-        self.on_timer_set: Optional[TimerSetCallback] = None
-        self.on_timer_delete: Optional[TimerDeleteCallback] = None
-        self.on_timer_list: Optional[TimerListCallback] = None
 
     # ── Lifecycle ────────────────────────────────────────────
 
     def start(self):
         logger.info("Connecting to MQTT broker %s:%d ...", self._host, self._port)
-
         attempt = 0
         while attempt < max(1, self._connect_retries):
             attempt += 1
@@ -98,23 +74,18 @@ class MQTTClient:
                 self._client.connect(self._host, self._port, self._keepalive)
                 self._client.loop_start()
 
-                # Wait for on_connect to set the flag
                 waited = 0.0
                 interval = 0.1
-                timeout = float(self._connect_timeout)
-                while waited < timeout:
+                while waited < float(self._connect_timeout):
                     if self._connected:
                         return
                     time.sleep(interval)
                     waited += interval
 
                 logger.warning(
-                    "Timeout waiting for MQTT connection (%.1fs) on attempt %d/%d",
-                    timeout,
-                    attempt,
-                    self._connect_retries,
+                    "Timeout waiting for MQTT connection (attempt %d/%d)",
+                    attempt, self._connect_retries,
                 )
-                # If not connected, stop loop and retry (if retries left)
                 try:
                     self._client.loop_stop()
                     self._client.disconnect()
@@ -124,94 +95,103 @@ class MQTTClient:
             except Exception as e:
                 logger.exception("MQTT connect attempt %d failed: %s", attempt, e)
 
-        logger.error("Failed to connect to MQTT broker after %d attempts", self._connect_retries)
+        logger.error("Failed to connect to MQTT broker after %d attempt(s)", self._connect_retries)
 
     def stop(self):
-        self.publish("status", {"state": "offline"}, retain=True)
         self._client.loop_stop()
         self._client.disconnect()
         logger.info("MQTT disconnected")
 
     # ── Publish helpers ──────────────────────────────────────
 
-    def publish(self, subtopic: str, payload, retain: bool = False):
-        """
-        Publish to {prefix}/{subtopic}.
-        payload can be a dict (→ JSON) or a string.
-        """
-        topic = f"{self._prefix}/{subtopic}"
-        if isinstance(payload, dict):
-            # Copy to avoid mutating caller dict and ensure `time` is present
-            p = payload.copy()
-            if "time" not in p:
-                p["time"] = datetime.now(timezone.utc).isoformat()
-            data = json.dumps(p)
-        else:
-            data = str(payload)
-        self._client.publish(topic, data, qos=self._qos, retain=retain)
-        logger.debug("PUB %s → %s", topic, data[:120])
+    def publish_sensor_data(self, sensor_name: str, value: object):
+        """Publish one sensor reading to {prefix}/sensorData."""
+        topic = f"{self._prefix}/sensorData"
+        payload = json.dumps({
+            sensor_name: value,
+            "time": datetime.now(timezone.utc).isoformat(),
+        })
+        self._client.publish(topic, payload, qos=self._qos)
+        logger.debug("PUB %s → %s", topic, payload[:120])
 
-    def publish_raw(self, topic: str, payload, retain: bool = False):
-        """Publish to an absolute topic (for custom timer publish_to)."""
-        if isinstance(payload, dict):
-            p = payload.copy()
-            if "time" not in p:
-                p["time"] = datetime.now(timezone.utc).isoformat()
-            data = json.dumps(p)
-        else:
-            data = str(payload)
-        self._client.publish(topic, data, qos=self._qos, retain=retain)
-        logger.debug("PUB %s → %s", topic, data[:120])
+    def publish_captured_photo(self, image_bytes: bytes, camera_name: Optional[str] = None):
+        topic = f"{self._prefix}/{camera_name}/capturedPhoto" if camera_name else f"{self._prefix}/capturedPhoto"
+        self._client.publish(topic, image_bytes, qos=self._qos)
+        logger.debug("PUB %s → <binary %d bytes>", topic, len(image_bytes))
+
+    def publish_ai_alert(self, image_bytes: bytes, description: str):
+        """Publish an AI detection alert to {prefix}/ai/alert.
+
+        JSON cannot contain raw bytes, so the JPEG is encoded as a Base64 string.
+        The payload intentionally uses the key `descreption` to match the
+        requested backend contract.
+        """
+        topic = f"{self._prefix}/ai/alert"
+        payload = json.dumps(
+            {
+                "image": base64.b64encode(image_bytes).decode("ascii"),
+                "descreption": description,
+            },
+            separators=(",", ":"),
+        )
+        self._client.publish(topic, payload, qos=self._qos)
+        logger.info(
+            "PUB %s → AI alert (%d JPEG bytes, %d JSON bytes): %s",
+            topic,
+            len(image_bytes),
+            len(payload),
+            description,
+        )
+
+    def publish_raw(self, topic: str, payload: str):
+        """Publish a raw string payload to an explicit topic (absolute path)."""
+        self._client.publish(topic, payload, qos=self._qos)
+        logger.debug("PUB %s → %s", topic, str(payload)[:120])
 
     # ── MQTT callbacks ───────────────────────────────────────
 
-    def _on_connect(self, client, userdata, flags, rc, properties=None):
-        if rc == 0:
-            logger.info("MQTT connected")
-            self._connected = True
-            # Subscribe to control topics
-            subs = [
-                f"{self._prefix}/cmd",
-                f"{self._prefix}/timer/set",
-                f"{self._prefix}/timer/delete",
-                f"{self._prefix}/timer/list",
-            ]
-            for topic in subs:
-                client.subscribe(topic, qos=self._qos)
-                logger.debug("Subscribed: %s", topic)
-
-            self.publish("status", {"state": "online"}, retain=True)
-        else:
+    def _on_connect(self, client, _userdata, _flags, rc, _properties=None):
+        if rc != 0:
             logger.error("MQTT connect failed, rc=%d", rc)
             self._connected = False
+            return
 
-    def _on_message(self, client, userdata, msg):
+        self._connected = True
+        logger.info("MQTT connected (prefix: %s)", self._prefix)
+
+        # Subscribe to every suffix the router knows about
+        for suffix in self._router.registered_suffixes():
+            topic = f"{self._prefix}/{suffix}"
+            client.subscribe(topic, qos=self._qos)
+            logger.info("Subscribed: %s", topic)
+
+    def _on_message(self, _client, _userdata, msg):
         topic = msg.topic
-        payload = msg.payload.decode("utf-8", errors="replace").strip()
-        logger.debug("MSG %s → %s", topic, payload[:120])
+        raw = msg.payload.decode("utf-8", errors="replace").strip()
+        logger.debug("MSG %s → %s", topic, raw[:120])
 
-        suffix = topic[len(self._prefix) + 1:]  # strip "arduino/"
+        prefix_with_slash = self._prefix + "/"
+        if not topic.startswith(prefix_with_slash):
+            return
 
-        try:
-            if suffix == "cmd":
-                if self.on_command:
-                    self.on_command(payload)
+        suffix = topic[len(prefix_with_slash):]
+        payload = _parse_payload(raw)
+        self._router.route(suffix, payload)
 
-            elif suffix == "timer/set":
-                if self.on_timer_set:
-                    data = json.loads(payload)
-                    self.on_timer_set(data)
 
-            elif suffix == "timer/delete":
-                if self.on_timer_delete:
-                    data = json.loads(payload)
-                    self.on_timer_delete(data.get("id", payload))
-
-            elif suffix == "timer/list":
-                if self.on_timer_list:
-                    self.on_timer_list()
-
-        except json.JSONDecodeError as e:
-            logger.error("Bad JSON on %s: %s", topic, e)
-        except Exception as e:
-            logger.exception("Error handling message on %s: %s", topic, e)
+def _parse_payload(raw: str) -> dict:
+    """Parse JSON payload, falling back to ast.literal_eval for single-quoted strings."""
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+    try:
+        result = ast.literal_eval(raw)
+        if isinstance(result, dict):
+            return result
+    except Exception:
+        pass
+    logger.warning("Cannot parse payload as JSON or dict literal: %s", raw[:120])
+    return {}

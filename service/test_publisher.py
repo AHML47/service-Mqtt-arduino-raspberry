@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 def publish_example(sensor: str, value: Any, count: int, interval: float, retain: bool):
     cfg = load_config()
     mcfg = cfg.get("mqtt", {})
-    prefix = mcfg.get("topic_prefix", "arduino")
+    prefix = mcfg.get("topic_prefix", "hydroponic/default")
     topic = f"{prefix}/sensorData"
 
     client = mqtt.Client()
@@ -34,7 +34,7 @@ def publish_example(sensor: str, value: Any, count: int, interval: float, retain
         client.username_pw_set(mcfg.get("username"), mcfg.get("password"))
 
     host = mcfg.get("host", "localhost")
-    port = int(mcfg.get("port", 1883))
+    port = int(mcfg.get("port", 1885))
 
     logger.info("Connecting to MQTT %s:%s (topic=%s)", host, port, topic)
     client.connect(host, port)
@@ -42,14 +42,15 @@ def publish_example(sensor: str, value: Any, count: int, interval: float, retain
 
     try:
         for i in range(count):
-                payload = {sensor: value}
-                if "time" not in payload:
-                    payload["time"] = datetime.now(timezone.utc).isoformat()
-                data = json.dumps(payload)
-                client.publish(topic, data, qos=int(mcfg.get("qos", 1)), retain=retain)
-                logger.info("Published %s → %s", topic, data)
-                if i < count - 1:
-                    time.sleep(interval)
+            payload = {
+                sensor: value,
+                "time": datetime.now(timezone.utc).isoformat(),
+            }
+            data = json.dumps(payload)
+            client.publish(topic, data, qos=int(mcfg.get("qos", 1)), retain=retain)
+            logger.info("Published %s → %s", topic, data)
+            if i < count - 1:
+                time.sleep(interval)
     finally:
         client.loop_stop()
         client.disconnect()
