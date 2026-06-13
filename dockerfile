@@ -5,6 +5,7 @@ RUN apt-get update && apt-get install -y \
     g++ \
     make \
     patchelf \
+    libcap-dev \
     ccache \
     build-essential \
     && rm -rf /var/lib/apt/lists/*

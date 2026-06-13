@@ -14,7 +14,7 @@ on:
 
 env:
   PYTHON_VERSION: "3.11"
-  APP_ENTRYPOINT: "service/__main__.py"
+  APP_ENTRYPOINT: "run_service.py"
   DIST_NAME: "ota-service"
 
 jobs:
@@ -39,15 +39,19 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
 
-      - name: Install dependencies
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcap-dev
+
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pytest
+          python -m pip install -r requirements.txt
+          python -m pip install pytest
 
       - name: Syntax check
-        run: |
-          python -m compileall -q .
+        run: python -m compileall -q .
 
       - name: Run tests
         run: |
@@ -80,7 +84,7 @@ jobs:
 
       - name: Create ARM64 build container definition
         run: |
-          cat > Dockerfile.ota <<'EOF'
+          cat > Dockerfile.ota <<'DOCKERFILE'
           FROM --platform=linux/arm64 python:3.11-slim-bookworm
 
           ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -93,17 +97,18 @@ jobs:
               build-essential \
               gcc \
               git \
+              libcap-dev \
               patchelf \
               && rm -rf /var/lib/apt/lists/*
 
           COPY requirements.txt /workspace/requirements.txt
 
           RUN python -m pip install --upgrade pip \
-              && pip install -r requirements.txt \
-              && pip install pyinstaller pytest
+              && python -m pip install -r requirements.txt \
+              && python -m pip install pyinstaller pytest
 
           COPY . /workspace
-          EOF
+          DOCKERFILE
 
       - name: Build ARM64 builder image
         run: |
@@ -136,23 +141,15 @@ jobs:
                 pytest -q
               fi
 
-              if [ ! -f "${APP_ENTRYPOINT}" ] && [ ! -f "app.py" ] && [ ! -f "main.py" ]; then
-                echo "Could not find an entrypoint. Set APP_ENTRYPOINT in the workflow."
+              if [ ! -f "${APP_ENTRYPOINT}" ]; then
+                echo "Could not find entrypoint: ${APP_ENTRYPOINT}"
                 exit 1
               fi
 
-              ENTRYPOINT="${APP_ENTRYPOINT}"
-              if [ ! -f "${ENTRYPOINT}" ]; then
-                if [ -f "app.py" ]; then
-                  ENTRYPOINT="app.py"
-                elif [ -f "main.py" ]; then
-                  ENTRYPOINT="main.py"
-                fi
-              fi
-
               rm -rf build dist
-              pyinstaller --noconfirm --onefile --name "${DIST_NAME}" "${ENTRYPOINT}"
+              pyinstaller --noconfirm --onefile --name "${DIST_NAME}" "${APP_ENTRYPOINT}"
 
+              "dist/${DIST_NAME}" --help >/dev/null
               sha256sum "dist/${DIST_NAME}" > "dist/${DIST_NAME}.sha256"
 
               VERSION="${RELEASE_NAME}"
@@ -171,47 +168,44 @@ jobs:
               }
               JSON
             '
-      - name: Debug Build Output
-        run: |
-          echo "Current directory:"
-          pwd
-      
-          echo "Repository files:"
-          ls -la
-      
-          echo "Dist directory:"
-          ls -la dist || true
-      
-          echo "Build directory:"
-          ls -la build || true
-      
-          echo "Find executable:"
-          find . -type f
 
-      - name: Upload local workflow artifact
+      - name: Show build output
+        run: ls -lah dist
+
+      - name: Upload GitHub Actions artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.DIST_NAME }}-arm64
           path: |
-            /workspace/dist/${{ env.DIST_NAME }}
-            /workspace/dist/${{ env.DIST_NAME }}.sha256
-            /workspace/dist/release.json
-      
+            dist/${{ env.DIST_NAME }}
+            dist/${{ env.DIST_NAME }}.sha256
+            dist/release.json
+
       - name: Install AWS CLI
+        run: python -m pip install awscli
+
+      - name: Upload artifacts to DigitalOcean Spaces
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.DO_SPACES_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.DO_SPACES_SECRET }}
+          AWS_DEFAULT_REGION: us-east-1
+          DO_SPACES_REGION: ${{ vars.DO_SPACES_REGION }}
+          DO_SPACES_BUCKET: ${{ vars.DO_SPACES_BUCKET }}
         run: |
-          pip install awscli
-      
-      - name: Configure DigitalOcean Spaces
-        run: |
-          aws configure set aws_access_key_id "${{ secrets.DO_SPACES_KEY }}"
-          aws configure set aws_secret_access_key "${{ secrets.DO_SPACES_SECRET }}"
-          aws configure set default.region "${{ vars.DO_SPACES_REGION }}"
-      
-      - name: Upload Artifact to DigitalOcean Spaces
-        run: |
-          aws s3 cp /home/runner/work/service-Mqtt-arduino-raspberry/service-Mqtt-arduino-raspberry/dist/${{ vars.APP_NAME }} \
-            s3://${{ vars.DO_SPACES_BUCKET }}/releases/${{ github.ref_name }}/${{ vars.APP_NAME }} \
-            --endpoint-url https://${{ vars.DO_SPACES_BUCKET }}.${{ vars.DO_SPACES_REGION }}.digitaloceanspaces.com
-      - name: Print uploaded location
-        run: |
-          echo "Uploaded release prefix: ota/${GITHUB_REF_NAME}/${GITHUB_SHA}"
+          set -euo pipefail
+          ENDPOINT="https://${DO_SPACES_REGION}.digitaloceanspaces.com"
+          PREFIX="releases/${GITHUB_REF_NAME}/${GITHUB_SHA}"
+
+          aws s3 cp "dist/${DIST_NAME}" \
+            "s3://${DO_SPACES_BUCKET}/${PREFIX}/${DIST_NAME}" \
+            --endpoint-url "${ENDPOINT}"
+
+          aws s3 cp "dist/${DIST_NAME}.sha256" \
+            "s3://${DO_SPACES_BUCKET}/${PREFIX}/${DIST_NAME}.sha256" \
+            --endpoint-url "${ENDPOINT}"
+
+          aws s3 cp "dist/release.json" \
+            "s3://${DO_SPACES_BUCKET}/${PREFIX}/release.json" \
+            --endpoint-url "${ENDPOINT}"
+
+          echo "Uploaded release prefix: ${PREFIX}"
