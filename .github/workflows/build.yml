@@ -1,4 +1,4 @@
-name: Build, Test, and Deploy Raspberry Pi OTA Binary
+name: Build, Test, and Deploy Raspberry Pi OTA Package
 
 on:
   push:
@@ -62,7 +62,7 @@ jobs:
           fi
 
   build-and-deploy:
-    name: Build ARM64 executable and deploy to DigitalOcean Spaces
+    name: Build ARM64 package and deploy to DigitalOcean Spaces
     needs: test
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
@@ -120,6 +120,8 @@ jobs:
             .
 
       - name: Build executable and run checks inside ARM64 container
+        env:
+          RELEASE_NAME: ${{ github.event.inputs.release_name || '' }}
         run: |
           mkdir -p dist
           docker run --rm \
@@ -128,7 +130,7 @@ jobs:
             -e DIST_NAME="${DIST_NAME}" \
             -e GITHUB_SHA="${GITHUB_SHA}" \
             -e GITHUB_REF_NAME="${GITHUB_REF_NAME}" \
-            -e RELEASE_NAME="${{ inputs.release_name }}" \
+            -e RELEASE_NAME="${RELEASE_NAME}" \
             -v "${PWD}:/workspace" \
             -w /workspace \
             ota-builder:latest \
@@ -149,42 +151,93 @@ jobs:
               rm -rf build dist
               pyinstaller --noconfirm --onefile --name "${DIST_NAME}" "${APP_ENTRYPOINT}"
 
+              chmod +x "dist/${DIST_NAME}"
               "dist/${DIST_NAME}" --help >/dev/null
               sha256sum "dist/${DIST_NAME}" > "dist/${DIST_NAME}.sha256"
-
-              VERSION="${RELEASE_NAME}"
-              if [ -z "${VERSION}" ]; then
-                VERSION="${GITHUB_REF_NAME:-${GITHUB_SHA}}"
-              fi
-
-              cat > "dist/release.json" <<JSON
-              {
-                "name": "${DIST_NAME}",
-                "version": "${VERSION}",
-                "git_sha": "${GITHUB_SHA}",
-                "ref_name": "${GITHUB_REF_NAME}",
-                "platform": "linux/arm64",
-                "built_at_utc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-              }
-              JSON
             '
 
+      - name: Create OTA ZIP package
+        env:
+          RELEASE_NAME: ${{ github.event.inputs.release_name || '' }}
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends zip rsync
+
+          VERSION="${RELEASE_NAME}"
+          if [ -z "${VERSION}" ]; then
+            VERSION="${GITHUB_REF_NAME:-${GITHUB_SHA}}"
+          fi
+
+          SAFE_VERSION="$(printf '%s' "${VERSION}" | tr '/ ' '--' | tr -cd 'A-Za-z0-9._-')"
+          SHORT_SHA="${GITHUB_SHA::7}"
+          PACKAGE_FILE="${DIST_NAME}-${SAFE_VERSION}-${SHORT_SHA}-linux-arm64.zip"
+          PACKAGE_ROOT="${RUNNER_TEMP}/${DIST_NAME}-package"
+
+          rm -rf "${PACKAGE_ROOT}"
+          mkdir -p "${PACKAGE_ROOT}"
+
+          # Copy the deployable repo content, but remove source/build-only files.
+          rsync -a ./ "${PACKAGE_ROOT}/" \
+            --exclude '.git/' \
+            --exclude '.github/' \
+            --exclude '.claude/' \
+            --exclude '.venv/' \
+            --exclude '__pycache__/' \
+            --exclude '.pytest_cache/' \
+            --exclude 'build/' \
+            --exclude 'dist/' \
+            --exclude 'Dockerfile.ota' \
+            --exclude '*.spec' \
+            --exclude '*.py' \
+            --exclude '*.pyc' \
+            --exclude '*.pyo'
+
+          # Put the compiled binary and release metadata into the package root.
+          install -m 0755 "dist/${DIST_NAME}" "${PACKAGE_ROOT}/${DIST_NAME}"
+          cp "dist/${DIST_NAME}.sha256" "${PACKAGE_ROOT}/${DIST_NAME}.sha256"
+
+          cat > "${PACKAGE_ROOT}/release.json" <<JSON
+          {
+            "name": "${DIST_NAME}",
+            "version": "${VERSION}",
+            "git_sha": "${GITHUB_SHA}",
+            "ref_name": "${GITHUB_REF_NAME}",
+            "platform": "linux/arm64",
+            "package_file": "${PACKAGE_FILE}",
+            "binary_file": "${DIST_NAME}",
+            "built_at_utc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          JSON
+
+          mkdir -p dist
+          (cd "${PACKAGE_ROOT}" && zip -r "${GITHUB_WORKSPACE}/dist/${PACKAGE_FILE}" .)
+          sha256sum "dist/${PACKAGE_FILE}" > "dist/${PACKAGE_FILE}.sha256"
+          cp "${PACKAGE_ROOT}/release.json" "dist/release.json"
+
+          echo "PACKAGE_FILE=${PACKAGE_FILE}" >> "${GITHUB_ENV}"
+          echo "Created package: dist/${PACKAGE_FILE}"
+
       - name: Show build output
-        run: ls -lah dist
+        run: |
+          ls -lah dist
+          echo "Package content:"
+          unzip -l "dist/${PACKAGE_FILE}" | sed -n '1,120p'
 
       - name: Upload GitHub Actions artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.DIST_NAME }}-arm64
+          name: ${{ env.DIST_NAME }}-arm64-package
           path: |
-            dist/${{ env.DIST_NAME }}
-            dist/${{ env.DIST_NAME }}.sha256
+            dist/${{ env.PACKAGE_FILE }}
+            dist/${{ env.PACKAGE_FILE }}.sha256
             dist/release.json
 
       - name: Install AWS CLI
         run: python -m pip install awscli
 
-      - name: Upload artifacts to DigitalOcean Spaces
+      - name: Upload package to DigitalOcean Spaces
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.DO_SPACES_KEY }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.DO_SPACES_SECRET }}
@@ -196,12 +249,12 @@ jobs:
           ENDPOINT="https://${DO_SPACES_REGION}.digitaloceanspaces.com"
           PREFIX="releases/${GITHUB_REF_NAME}/${GITHUB_SHA}"
 
-          aws s3 cp "dist/${DIST_NAME}" \
-            "s3://${DO_SPACES_BUCKET}/${PREFIX}/${DIST_NAME}" \
+          aws s3 cp "dist/${PACKAGE_FILE}" \
+            "s3://${DO_SPACES_BUCKET}/${PREFIX}/${PACKAGE_FILE}" \
             --endpoint-url "${ENDPOINT}"
 
-          aws s3 cp "dist/${DIST_NAME}.sha256" \
-            "s3://${DO_SPACES_BUCKET}/${PREFIX}/${DIST_NAME}.sha256" \
+          aws s3 cp "dist/${PACKAGE_FILE}.sha256" \
+            "s3://${DO_SPACES_BUCKET}/${PREFIX}/${PACKAGE_FILE}.sha256" \
             --endpoint-url "${ENDPOINT}"
 
           aws s3 cp "dist/release.json" \
@@ -209,3 +262,4 @@ jobs:
             --endpoint-url "${ENDPOINT}"
 
           echo "Uploaded release prefix: ${PREFIX}"
+          echo "Uploaded package: ${PACKAGE_FILE}"
