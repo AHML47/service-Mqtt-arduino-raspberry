@@ -154,8 +154,12 @@ jobs:
               chmod +x "dist/${DIST_NAME}"
               "dist/${DIST_NAME}" --help >/dev/null
               sha256sum "dist/${DIST_NAME}" > "dist/${DIST_NAME}.sha256"
+              
             '
-
+      - name: Fix permissions after Docker build
+        run: |
+          sudo chown -R "$USER:$USER" dist build || true
+          chmod -R u+rwX dist build || true
       - name: Create OTA ZIP package
         env:
           RELEASE_NAME: ${{ github.event.inputs.release_name || '' }}
