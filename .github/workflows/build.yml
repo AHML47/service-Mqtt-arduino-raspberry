@@ -1,4 +1,4 @@
-name: Build, Test, and Deploy Raspberry Pi OTA Binary
+name: Build, Test, and Deploy Raspberry Pi OTA Package
 
 on:
   push:
@@ -15,7 +15,7 @@ on:
 env:
   PYTHON_VERSION: "3.11"
   APP_ENTRYPOINT: "service/run_service.py"
-  DIST_NAME: "ota-service"
+  DIST_NAME: "software"
 
 jobs:
   test:
@@ -39,7 +39,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
 
-      - name: Install Linux build dependencies
+      - name: Install Linux test dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libcap-dev
@@ -62,7 +62,7 @@ jobs:
           fi
 
   build-and-deploy:
-    name: Build ARM64 executable and deploy to DigitalOcean Spaces
+    name: Build ARM64 package and deploy to DigitalOcean Spaces
     needs: test
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
@@ -120,15 +120,20 @@ jobs:
             .
 
       - name: Build executable and run checks inside ARM64 container
+        env:
+          RELEASE_NAME: ${{ inputs.release_name || '' }}
         run: |
+          set -euo pipefail
+
           mkdir -p dist
+
           docker run --rm \
             --platform linux/arm64 \
             -e APP_ENTRYPOINT="${APP_ENTRYPOINT}" \
             -e DIST_NAME="${DIST_NAME}" \
             -e GITHUB_SHA="${GITHUB_SHA}" \
             -e GITHUB_REF_NAME="${GITHUB_REF_NAME}" \
-            -e RELEASE_NAME="${{ inputs.release_name }}" \
+            -e RELEASE_NAME="${RELEASE_NAME}" \
             -v "${PWD}:/workspace" \
             -w /workspace \
             ota-builder:latest \
@@ -147,44 +152,122 @@ jobs:
               fi
 
               rm -rf build dist
-              pyinstaller --noconfirm --onefile --name "${DIST_NAME}" "${APP_ENTRYPOINT}"
 
-              "dist/${DIST_NAME}" --help >/dev/null
+              pyinstaller --noconfirm --clean --onefile \
+                --name "${DIST_NAME}" \
+                "${APP_ENTRYPOINT}"
+
+              chmod +x "dist/${DIST_NAME}"
+              "dist/${DIST_NAME}" --help >/dev/null || true
               sha256sum "dist/${DIST_NAME}" > "dist/${DIST_NAME}.sha256"
-
-              VERSION="${RELEASE_NAME}"
-              if [ -z "${VERSION}" ]; then
-                VERSION="${GITHUB_REF_NAME:-${GITHUB_SHA}}"
-              fi
-
-              cat > "dist/release.json" <<JSON
-              {
-                "name": "${DIST_NAME}",
-                "version": "${VERSION}",
-                "git_sha": "${GITHUB_SHA}",
-                "ref_name": "${GITHUB_REF_NAME}",
-                "platform": "linux/arm64",
-                "built_at_utc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-              }
-              JSON
             '
 
+      - name: Fix permissions after Docker build
+        run: |
+          sudo chown -R "$USER:$USER" dist build || true
+          chmod -R u+rwX dist build || true
+
+      - name: Install packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends zip unzip rsync
+
+      - name: Create OTA ZIP package
+        env:
+          RELEASE_NAME: ${{ inputs.release_name || '' }}
+        run: |
+          set -euo pipefail
+
+          VERSION="${RELEASE_NAME}"
+          if [ -z "${VERSION}" ]; then
+            VERSION="${GITHUB_REF_NAME:-${GITHUB_SHA}}"
+          fi
+
+          SAFE_VERSION="$(printf '%s' "${VERSION}" | tr '/ ' '--' | tr -cd 'A-Za-z0-9._-')"
+          SHORT_SHA="${GITHUB_SHA::7}"
+
+          PACKAGE_NAME="${DIST_NAME}-${SAFE_VERSION}-${SHORT_SHA}-linux-arm64"
+          PACKAGE_FILE="${PACKAGE_NAME}.zip"
+          PACKAGE_ROOT="${RUNNER_TEMP}/${PACKAGE_NAME}"
+
+          rm -rf "${PACKAGE_ROOT}"
+          mkdir -p "${PACKAGE_ROOT}"
+
+          # Copy the deployable repository content, but remove source/build-only files.
+          rsync -a ./ "${PACKAGE_ROOT}/" \
+            --exclude '.git/' \
+            --exclude '.github/' \
+            --exclude '.claude/' \
+            --exclude '.venv/' \
+            --exclude 'venv/' \
+            --exclude '__pycache__/' \
+            --exclude '.pytest_cache/' \
+            --exclude 'build/' \
+            --exclude 'dist/' \
+            --exclude 'package/' \
+            --exclude 'Dockerfile.ota' \
+            --exclude '*.spec' \
+            --exclude '*.py' \
+            --exclude '*.pyc' \
+            --exclude '*.pyo'
+
+          # Add the compiled executable and metadata.
+          install -m 0755 "dist/${DIST_NAME}" "${PACKAGE_ROOT}/${DIST_NAME}"
+          cp "dist/${DIST_NAME}.sha256" "${PACKAGE_ROOT}/${DIST_NAME}.sha256"
+
+          cat > "${PACKAGE_ROOT}/release.json" <<JSON
+          {
+            "name": "${DIST_NAME}",
+            "version": "${VERSION}",
+            "git_sha": "${GITHUB_SHA}",
+            "ref_name": "${GITHUB_REF_NAME}",
+            "platform": "linux/arm64",
+            "package_file": "${PACKAGE_FILE}",
+            "binary_file": "${DIST_NAME}",
+            "built_at_utc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          JSON
+
+          mkdir -p dist
+
+          # Create the ZIP in dist from inside RUNNER_TEMP to avoid permission problems.
+          (
+            cd "${RUNNER_TEMP}"
+            zip -r "${GITHUB_WORKSPACE}/dist/${PACKAGE_FILE}" "${PACKAGE_NAME}"
+          )
+
+          sha256sum "dist/${PACKAGE_FILE}" > "dist/${PACKAGE_FILE}.sha256"
+          cp "${PACKAGE_ROOT}/release.json" "dist/release.json"
+
+          echo "PACKAGE_NAME=${PACKAGE_NAME}" >> "${GITHUB_ENV}"
+          echo "PACKAGE_FILE=${PACKAGE_FILE}" >> "${GITHUB_ENV}"
+          echo "PACKAGE_PATH=dist/${PACKAGE_FILE}" >> "${GITHUB_ENV}"
+          echo "PACKAGE_SHA_PATH=dist/${PACKAGE_FILE}.sha256" >> "${GITHUB_ENV}"
+
+          echo "Created package: dist/${PACKAGE_FILE}"
+
       - name: Show build output
-        run: ls -lah dist
+        run: |
+          set -euo pipefail
+          ls -lah dist
+          echo "Package content:"
+          unzip -l "${PACKAGE_PATH}" | sed -n '1,160p'
 
       - name: Upload GitHub Actions artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.DIST_NAME }}-arm64
+          name: ${{ env.DIST_NAME }}-arm64-package
           path: |
-            dist/${{ env.DIST_NAME }}
-            dist/${{ env.DIST_NAME }}.sha256
+            ${{ env.PACKAGE_PATH }}
+            ${{ env.PACKAGE_SHA_PATH }}
             dist/release.json
 
       - name: Install AWS CLI
-        run: python -m pip install awscli
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install awscli
 
-      - name: Upload artifacts to DigitalOcean Spaces
+      - name: Upload package to DigitalOcean Spaces
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.DO_SPACES_KEY }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.DO_SPACES_SECRET }}
@@ -193,19 +276,35 @@ jobs:
           DO_SPACES_BUCKET: ${{ vars.DO_SPACES_BUCKET }}
         run: |
           set -euo pipefail
-          ENDPOINT="https://${DO_SPACES_REGION}.digitaloceanspaces.com"
-          PREFIX="releases/${GITHUB_REF_NAME}/${GITHUB_SHA}"
 
-          aws s3 cp "dist/${DIST_NAME}" \
-            "s3://${DO_SPACES_BUCKET}/${PREFIX}/${DIST_NAME}" \
+          if [ -z "${DO_SPACES_REGION}" ]; then
+            echo "DO_SPACES_REGION variable is missing."
+            exit 1
+          fi
+
+          if [ -z "${DO_SPACES_BUCKET}" ]; then
+            echo "DO_SPACES_BUCKET variable is missing."
+            exit 1
+          fi
+
+          ENDPOINT="https://${DO_SPACES_REGION}.digitaloceanspaces.com"
+
+          # DigitalOcean folder name based on the sending/upload time.
+          SEND_TIME="$(TZ=Africa/Tunis date +%Y-%m-%d_%H-%M-%S)"
+          PREFIX="releases/${SEND_TIME}"
+
+          aws s3 cp "${PACKAGE_PATH}" \
+            "s3://${DO_SPACES_BUCKET}/${PREFIX}/${PACKAGE_FILE}" \
             --endpoint-url "${ENDPOINT}"
 
-          aws s3 cp "dist/${DIST_NAME}.sha256" \
-            "s3://${DO_SPACES_BUCKET}/${PREFIX}/${DIST_NAME}.sha256" \
+          aws s3 cp "${PACKAGE_SHA_PATH}" \
+            "s3://${DO_SPACES_BUCKET}/${PREFIX}/${PACKAGE_FILE}.sha256" \
             --endpoint-url "${ENDPOINT}"
 
           aws s3 cp "dist/release.json" \
             "s3://${DO_SPACES_BUCKET}/${PREFIX}/release.json" \
             --endpoint-url "${ENDPOINT}"
 
+          echo "DIGITALOCEAN_RELEASE_PREFIX=${PREFIX}" >> "${GITHUB_ENV}"
           echo "Uploaded release prefix: ${PREFIX}"
+          echo "Uploaded package: ${PACKAGE_FILE}"
