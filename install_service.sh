@@ -59,4 +59,6 @@ echo "[4/4] Starting service"
 systemctl restart "${SERVICE_NAME}"
 
 echo "Install complete. Check status with: sudo systemctl status ${SERVICE_NAME}"
+
 echo "Logs: sudo journalctl -u ${SERVICE_NAME} -f"
+
