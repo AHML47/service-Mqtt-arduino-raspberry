@@ -37,6 +37,7 @@ from .operator_registry import OperatorRegistry
 from .topic_router import TopicRouter
 from .cycle_manager import CycleManager
 from .ai_inference import PlantDiseaseDES
+from .config import _build_dynamic_cycle
 
 logger = logging.getLogger(__name__)
 
@@ -121,39 +122,12 @@ class HydroponicBridgeService:
 
         # ── Register topic handlers ───────────────────────────
         # To add a new inbound topic: call self._router.register() here.
-        self._router.register(
-            "ping",
-            self._handle_ping,
-            description="Connection check: {} → pong/{status,time}",
-        )
-        self._router.register(
-            "readSensor",
-            self._handle_read_sensor,
-            description='Read one sensor: {"sensor": "<name>"} → sensorData',
-        )
-        self._router.register(
-            "readAllSensors",
-            self._handle_read_all_sensors,
-            description="Read all sensors: {} → sensorData (one message per sensor)",
-        )
-        self._router.register(
-            "command",
-            self._handle_command,
-            description='Send raw Arduino command: {"command": "<cmd>"} → commandResponse',
-        )
         default_camera_name = self._cameras.default_name()
         if default_camera_name:
             self._router.register(
-                "capturePhoto",
-                functools.partial(self._handle_capture_photo, default_camera_name),
-                description='Legacy capturePhoto for the default camera: {"id":...,"param":{"time":<delay_s>}} → capturedPhoto',
-            )
-
-        for camera in self._cameras.all():
-            self._router.register(
-                f"{camera.name}/capturePhoto",
-                functools.partial(self._handle_capture_photo, camera.name),
-                description=f'Capture photo for camera {camera.name}: {{"id":...,"param":{{"time":<delay_s>}}}} → {camera.name}/capturedPhoto',
+                "ai/scan",
+                self._handle_ai_scan,
+                description="Trigger camera capture and AI analysis: {} → ai/alert",
             )
 
         # ── Operator topics ────────────────────────────────────
@@ -165,6 +139,7 @@ class HydroponicBridgeService:
             )
 
         # ── Cycle manager ─────────────────────────────────────
+        self._static_cycles = list(config.get("cycles", []))
         self._cycle_manager = CycleManager(
             cycles_config=config.get("cycles", []),
             serial=self._serial,
@@ -172,8 +147,18 @@ class HydroponicBridgeService:
             topic_prefix=self._prefix,
             sensor_registry=self._sensors,
             publish_sensor_data=self._publish_sensor_data,
+            operator_registry=self._operators,
         )
-        self._cycle_manager.on_capture_photo = lambda: self._capture_and_publish("SN_6a0a06f04e", 0.0)
+        default_camera = self._cameras.default_name()
+        if default_camera:
+            self._cycle_manager.on_capture_photo = lambda: self._capture_and_publish(default_camera, 0.0)
+
+        # ── Dynamic Cycle Config topic ────────────────────────
+        self._router.register(
+            "config/cycle",
+            self._handle_config_cycle,
+            description="Dynamically reloads the active production cycle parameters: {}",
+        )
 
     # ── Lifecycle ─────────────────────────────────────────────
 
@@ -201,6 +186,11 @@ class HydroponicBridgeService:
             self._serial.start()
             self._mqtt.start()
             self._cycle_manager.start()
+            
+            # Start heartbeat thread
+            self._heartbeat_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
+            self._heartbeat_thread.start()
+            
             self._running = True
             logger.info("Service is running. Press Ctrl+C to stop.")
             while self._running:
@@ -262,7 +252,16 @@ class HydroponicBridgeService:
         )
 
     def _handle_operator_cmd(self, op, payload: dict):
-        """Handle incoming operator command by dispatching to a thread."""
+        """Handle incoming operator command by dispatching to a thread.
+
+        The backend sends payloads in two possible formats:
+          1. Direct serial: {"id":"…","param":{"command":"lamp1:ON"}}
+          2. Action-based:  {"id":"…","param":{"action":"on","duration":5}}
+
+        Format 1 is used by the Spring Boot SendDeviceCommandUseCase.
+        Format 2 is the original RPi operator system.
+        We try Format 1 first, then fall back to Format 2.
+        """
         cmd_id = payload.get("id")
         param = payload.get("param") or {}
         threading.Thread(
@@ -274,6 +273,31 @@ class HydroponicBridgeService:
 
     def _run_operator_cmd(self, op, cmd_id, param: dict):
         try:
+            # ── Path 1: Backend sends a direct serial command ─────────
+            direct_command = None
+            if isinstance(param, dict):
+                # Backend payload is e.g. {"command": "lamp1:ON"} or {"payload": "lamp1:ON"}
+                direct_command = (
+                    param.get("command")
+                    or param.get("payload")
+                    or param.get("value")
+                )
+            elif isinstance(param, str):
+                direct_command = param
+
+            if direct_command and isinstance(direct_command, str):
+                direct_command = direct_command.strip()
+                if direct_command:
+                    logger.info("Operator %s: executing direct command '%s'", op.name, direct_command)
+                    response = self._serial.send(direct_command)
+                    result = "OK" if response and response.startswith("OK") else f"DONE:{response}"
+                    self._mqtt.publish_raw(
+                        f"{self._prefix}/{op.name}/resp",
+                        json.dumps({"id": cmd_id, "response": result}),
+                    )
+                    return
+
+            # ── Path 2: Original action-based dispatch ────────────────
             result = self._operators.execute(op, param, self._serial)
         except Exception as exc:
             logger.exception("Operator %s failed", op.name)
@@ -284,16 +308,37 @@ class HydroponicBridgeService:
         )
 
     def _handle_capture_photo(self, camera_name: str, payload: dict):
-        """payload: {"id": ..., "param": {"time": <delay_s>}} for a named camera route."""
-        params = payload.get("param") if isinstance(payload.get("param"), dict) else None
-        delay_s = _parse_delay(params or payload)
-        logger.info("capturePhoto requested; camera=%s, delay=%.3fs", camera_name, delay_s)
-        threading.Thread(
-            target=self._capture_and_publish,
-            args=(camera_name, delay_s),
-            daemon=True,
-            name=f"photo-capture-{camera_name}",
-        ).start()
+        """payload: {"id":...,"param":{"time":<delay_s>}} — capture a photo and publish to capturedPhoto."""
+        params = payload.get("param") or {}
+        delay_s = float(params.get("time", 0.0))
+        self._capture_and_publish(camera_name, delay_s)
+
+    def _handle_ai_scan(self, _payload: dict):
+        """payload: {} — capture a photo, run AI analysis and publish to ai/alert."""
+        default_camera = self._cameras.default_name()
+        if default_camera:
+            logger.info("Received ai/scan command. Triggering capture and AI.")
+            self._capture_and_publish(default_camera, 0.0)
+        else:
+            logger.error("Cannot scan: no default camera configured")
+            self._mqtt.publish_ai_error("No default camera configured on the Raspberry Pi.")
+
+    # ── Heartbeat ──────────────────────────────────────────────────
+
+    def _heartbeat_loop(self):
+        """Periodically publish a heartbeat to indicate the system is online."""
+        while self._running:
+            try:
+                if self._mqtt._connected:
+                    self._mqtt.publish_system_status("online")
+            except Exception as e:
+                logger.debug("Heartbeat error: %s", e)
+            
+            # Sleep in chunks to allow fast shutdown
+            for _ in range(30):
+                if not self._running:
+                    break
+                time.sleep(1)
 
     # ── Serial push → MQTT sensorData ─────────────────────────
 
@@ -301,8 +346,11 @@ class HydroponicBridgeService:
         """Receive unsolicited Arduino push, map via registry, publish to sensorData."""
         if not self._publish_sensor_data:
             return
-        for sensor_name, value in self._sensors.parse_push(device, payload):
-            self._mqtt.publish_sensor_data(sensor_name, value)
+        try:
+            for sensor_name, value in self._sensors.parse_push(device, payload):
+                self._mqtt.publish_sensor_data(sensor_name, value)
+        except Exception as exc:
+            logger.error("Failed to process push from device '%s': %s", device, exc)
 
     # ── Photo helpers ─────────────────────────────────────────
 
@@ -317,8 +365,10 @@ class HydroponicBridgeService:
             self._analyse_and_publish_ai_alert(result)
         except PhotoCaptureError as exc:
             logger.error("Photo capture failed: %s", exc)
+            self._mqtt.publish_ai_error(f"Camera error: {exc}")
         except Exception as exc:
             logger.exception("Unexpected photo capture error: %s", exc)
+            self._mqtt.publish_ai_error(f"Internal error: {exc}")
 
     def _handle_stream_capture(self, path: str, filename: str):
         """Publish and analyse a snapshot captured from the browser stream page."""
@@ -351,9 +401,12 @@ class HydroponicBridgeService:
 
         try:
             detection = self._ai.classify(photo_result.path)
+            self._log_ai_class_probabilities(detection)
+
             self._mqtt.publish_ai_alert(
                 image_bytes=photo_result.content,
-                description=detection["description"],
+                pathology=detection["class_name"],
+                confidence=detection["probability"] * 100.0,
             )
             logger.info(
                 "AI detection: %s via %s in %.3fs",
@@ -363,6 +416,82 @@ class HydroponicBridgeService:
             )
         except Exception as exc:
             logger.exception("AI detection failed for %s: %s", photo_result.filename, exc)
+            self._mqtt.publish_ai_error(f"AI Model error: {exc}")
+
+    def _log_ai_class_probabilities(self, detection: dict):
+        """Log all class probabilities without changing the MQTT AI alert payload."""
+        probabilities = detection.get("ranked_class_probabilities") or detection.get("class_probabilities")
+        if not probabilities:
+            logger.info("AI class probabilities are not available in the inference result")
+            return
+
+        # If only the unsorted list is available, sort it for easier reading in journalctl.
+        probabilities = sorted(
+            probabilities,
+            key=lambda item: float(item.get("probability", 0.0)),
+            reverse=True,
+        )
+
+        logger.info("AI class probabilities (%d classes):", len(probabilities))
+        for item in probabilities:
+            probability = float(item.get("probability", 0.0))
+            percentage = float(item.get("percentage", probability * 100.0))
+            logger.info(
+                "  [%02d] %s: %.6f (%.3f%%)",
+                int(item.get("class_index", -1)),
+                str(item.get("class_name", "<unknown>")),
+                probability,
+                percentage,
+            )
+
+    def _handle_config_cycle(self, payload: dict):
+        """payload: {"cycleId":..., "plantType":..., "irrigationFrequencyMinutes":..., "irrigationDurationSeconds":...}
+        Dynamically rebuild and reload execution cycles based on the published production cycle.
+        """
+        logger.info("Received cycle configuration update via MQTT: %s", payload)
+
+        status = payload.get("status")
+        if status == "INACTIVE" or not payload.get("cycleId"):
+            logger.info("No active production cycle. Reloading to static baseline cycles only.")
+            self._cycle_manager.reload_cycles(self._static_cycles)
+            return
+
+        # Build backend_data map structure expected by config._build_dynamic_cycle
+        backend_data = {
+            "activeCycle": {
+                "irrigationFrequencyMinutes": payload.get("irrigationFrequencyMinutes"),
+                "irrigationDurationSeconds": payload.get("irrigationDurationSeconds"),
+                "targetTemperatureMin": payload.get("tempMin"),
+                "targetTemperatureMax": payload.get("tempMax"),
+                "targetHumidity": payload.get("humTarget"),
+                "targetLightHours": payload.get("lightHours"),
+            }
+        }
+
+        # Build dynamic cycles
+        dynamic_cycles = _build_dynamic_cycle(
+            self._config.get("sensors", []),
+            self._config.get("operators", []),
+            backend_data
+        )
+
+        # Combine static cycles and dynamic cycles, avoiding duplicates
+        combined = list(self._static_cycles)
+        for dc in dynamic_cycles:
+            # Check if cycle name is already present
+            if not any(sc.get("name") == dc.get("name") for sc in combined):
+                # If it is auto_sensor_publish, skip if we already have a sensor polling cycle
+                if dc.get("name") == "auto_sensor_publish":
+                    has_sensor_cycle = any(
+                        any(c.get("type") == "sensor" for c in sc.get("commands", []))
+                        for sc in combined
+                    )
+                    if has_sensor_cycle:
+                        continue
+                combined.append(dc)
+
+        logger.info("Dynamic cycle reload: updating CycleManager with %d combined cycles", len(combined))
+        self._cycle_manager.reload_cycles(combined)
 
 
 # ── Utilities ─────────────────────────────────────────────────

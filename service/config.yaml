@@ -1,10 +1,8 @@
 # ── Hydroponic Bridge Configuration ──────────────────────────
-# Copy to config.yaml (project root) and edit for your setup.
-# Set the CONNECTION_STRING environment variable to define the
-# MQTT prefix: hydroponic/{CONNECTION_STRING}
+# Real greenhouse: hydro-uj0a7s / zone-ef8f9716
 
 serial:
-  port: auto               # auto-detect Arduino serial port
+  port: "/dev/ttyACM0"     # Arduino serial port
   baudrate: 9600
   timeout: 1.0
   response_timeout: 2.0
@@ -14,11 +12,9 @@ mqtt:
   port: 1883
   username: backend
   password: backend
-  client_id: hydroponic-bridge-raspi
+  client_id: hydroponic-bridge-uj0a7s
+  topic_prefix: "hydroponic/hydro-uj0a7s/zone-ef8f9716"
   publish_sensor_data: true
-  # topic_prefix is set automatically from CONNECTION_STRING env var.
-  # Override here only if not using the env var.
-  topic_prefix: hydroponic/default
   qos: 1
   keepalive: 6000
 
@@ -28,90 +24,111 @@ photo:
   raw_resolution: [4608, 2592]
   warmup_s: 2.0
   autofocus: true
-
-# Named cameras. If omitted, the service creates one default camera from
-# the `photo` section above. Use `param.camera` in capturePhoto payloads.
-cameras:
-  - name: SN_6a0a06f04e
-    output_dir: photos
-    resolution: [1280, 720]
-    raw_resolution: [4608, 2592]
-    warmup_s: 2.0
-    autofocus: true
+  name: "SN_6a0a06f04e"     # camera serial number from DB
 
 streaming:
-  enabled: true   # set to true to enable MJPEG stream at http://<pi-ip>:<port>
+  enabled: true
   port: 8000
 
 logging:
   level: DEBUG
 
-# ── Cycle System ──────────────────────────────────────────────
-# Each group runs its commands every `interval` seconds.
-# run_on_start: true  → also execute immediately when the service starts.
-#
-# Command types:
-#   serial  → send command to Arduino; set publish_response: true to push
-#             the OK: result to the sensorData MQTT topic.
-#   sensor  → read sensors by name (each with its own command/field_index)
-#             and publish every value to sensorData. Omit `sensors` to read
-#             all registered sensors. Requires publish_sensor_data: true.
-#   photo   → capture and publish a photo (uses the camera module).
-#   mqtt    → publish a raw payload to any topic; use {prefix} as a
-#             placeholder for the configured topic_prefix.
-#
-# delay_after: N  → wait N seconds after this command before the next one.
+# ── Sensors ───────────────────────────────────────────────────
+# DB: temperature (SN_18d79c7303) → temperature + humidity
+# DB: humid Sensor 1 (SN_0093d96dfb) → humidity
+sensors:
+  - name: "SN_5b154c9738"
+    arduino_device: "temperature"
+    command: "temperature:TEMP"
+    field_index: 0
+  - name: "SN_26067e549e"
+    arduino_device: "humidity"
+    command: "humidity:HUM"
+    field_index: 0
+  - name: "SN_8b3572a842"
+    arduino_device: "ultra1"
+    command: "ultra1:READ"
+    field_index: 0
+  
+# ── Operators (actionneurs) ───────────────────────────────────
+# Operator names MUST match the serial numbers in the database
+# because the backend publishes to {prefix}/{serialNumber}/cmd
+operators:
+  - name: "SN_LED_001"
+    arduino_device: "testLed"
+    actions:
+      "on":
+        command: "testLed:ON"
+        duration_param: duration
+        followup: "testLed:OFF"
+      "off":
+        command: "testLed:OFF"
+  - name: "SN_PUMP_001"
+    arduino_device: "dc1"
+    actions:
+      "on":
+        command: "dc1:ON"
+        duration_param: duration
+        followup: "dc1:OFF"
+      "off":
+        command: "dc1:OFF"
+      "speed":
+        command: "dc1:SPEED:{speed}"
 
+  - name: "SN_serre_reel_zone_ef8f9716_moteur_de_camera_001"
+    arduino_device: "step1"
+    actions:
+      "on":
+        command: "step1:MOVE:200000:150"
+      "off":
+        command: "step1:STOP"
+      "move":
+        command: "step1:MOVE:{steps}"
+      "move_speed":
+        command: "step1:MOVE:{steps}:{delay}"
+      "cw":
+        command: "step1:CW"
+      "cw_speed":
+        command: "step1:CW:{delay}"
+      "ccw":
+        command: "step1:CCW"
+      "stop":
+        command: "step1:STOP"
+      "pos":
+        command: "step1:POS"
+      "status":
+        command: "step1:STATUS"
+      "zero":
+        command: "step1:ZERO"
+
+# ── Cameras ───────────────────────────────────────────────────
+cameras:
+  - name: "SN_6a0a06f04e"
+
+# ── Cycles ────────────────────────────────────────────────────
 cycles:
-  # Continuously publish DHT data (temperature + humidity) every 60s.
-  - name: dht_publish
-    interval: 60
+  - name: "sensor_polling"
+    interval: 30
     run_on_start: true
     commands:
       - type: sensor
-        sensors:
-          - SN_1d6c305bf4   # temperature (temperature:TEMP)
-          - SN_0093d96dfb   # humidity    (temperature:HUM)
 
-  - name: tri_hourly_cultivation
-    interval: 10800         # 3 hours
-    run_on_start: true      # also runs immediately when the service starts
+  - name: "auto_irrigation"
+    interval: 10800 # run every 3heure s (300s)
+    run_on_start: true
     commands:
       - type: serial
-        command: dc1:ON
-        publish_response: false
-        delay_after: 2
-      - type: photo
-        delay_after: 2
+        command: "dc1:ON"
+        delay_after: 30   # run pump for 30 seconds
       - type: serial
-        command: step1:MOVE:340085
-        publish_response: false
-        delay_after: 60
-      - type: photo
-        delay_after: 2
-      - type: serial
-        command: step1:MOVE:-340085
-        publish_response: false
-        delay_after: 4
-      - type: serial
-        command: dc1:OFF
-        publish_response: false
+        command: "dc1:OFF"
 
-# ── Operators (first-class actuators) ─────────────────────────
-# Define operators that map MQTT-level names to Arduino devices and actions.
-operators:
-  - name: motor1
-    arduino_device: dc1
-    actions:
-      on:
-        command: "{device}:ON"
-        duration_param: duration
-        followup: "{device}:OFF"
-      off:
-        command: "{device}:OFF"
-
-  - name: SN_eb8c133df2
-    arduino_device: step1
-    actions:
-      move:
-        command: "{device}:MOVE:{steps}"
+  - name: "auto_lighting"
+    interval: 10800    # run every 10 minutes (600s)
+    run_on_start: true
+    commands:
+      - type: serial
+        command: "testLed:ON"
+        delay_after: 120     # keep light on for 2 minutes (120s)
+      - type: serial
+        command: "testLed:OFF"

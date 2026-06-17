@@ -1,10 +1,26 @@
 """
-Configuration loader — YAML file with environment variable overrides.
+Configuration loader — YAML file with environment variable overrides
+and optional dynamic config fetch from the Spring Boot backend.
+
+Priority (highest to lowest):
+  1. Environment variables (CONNECTION_STRING, ZONE_NAME, BACKEND_URL, …)
+  2. YAML config file (config.yaml)
+  3. Dynamic config fetched from backend at startup (if BACKEND_URL is set)
+  4. Built-in defaults
+
+Dynamic config (backend):
+  If BACKEND_URL and CONNECTION_STRING are both set, the service will call
+  GET {BACKEND_URL}/api/pi-config/{CONNECTION_STRING}
+  and merge the returned sensor/operator list into the running config.
+  This means you never have to hardcode sensor serial numbers on the Pi.
+  New sensors added through the web UI are automatically picked up on the
+  next service restart.
 """
 
 import glob
 import os
 import logging
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -59,11 +75,11 @@ DEFAULT_CONFIG = {
         "port": 1883,
         "username": "backend",
         "password": "backend",
-        "client_id": "hydroponic-bridge-rraspi",
-        # Overridden at runtime by CONNECTION_STRING + ZONE_NAME env vars → hydroponic/{conn}/{zone}
-        "topic_prefix": "hydroponic/default/default",
+        "client_id": "hydroponic-bridge",
+        # Set at runtime by CONNECTION_STRING + ZONE_NAME env vars
+        "topic_prefix": "hydroponic/default",
         # When true, unsolicited Arduino push lines are forwarded to sensorData
-        "publish_sensor_data": False,
+        "publish_sensor_data": True,
         "connect_timeout": 30,
         "connect_retries": 10,
         "qos": 1,
@@ -82,7 +98,7 @@ DEFAULT_CONFIG = {
         "port": 8000,
     },
     "ai": {
-        "enabled": False,
+        "enabled": True,
         "required": False,
         "models_dir": "onnx_raspberry_pi",
         "threads": 4,
@@ -90,26 +106,9 @@ DEFAULT_CONFIG = {
     "logging": {
         "level": "DEBUG",
     },
-    # Sensor name → Arduino device mapping.
-    # field_index: position in the colon-separated OK response (0-based).
-    # command: full string sent to the Arduino to request a reading.
-    # Add new sensors here or override in config.yaml.
-    "sensors": [
-        {
-            "name": "SN_1d6c305bf4",
-            "arduino_device": "temperature",
-            "field_index": 0,
-            "command": "temperature:TEMP",
-        },
-        {
-            "name": "SN_0093d96dfb",
-            "arduino_device": "temperature",
-            "field_index": 0,
-            "command": "temperature:HUM",
-        },
-    ],
+    # Empty by default — populated dynamically from backend or config.yaml
+    "sensors": [],
     "cycles": [],
-    # Operator definitions (first-class actuators). See service/operator_registry.py
     "operators": [],
 }
 
@@ -125,15 +124,185 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return merged
 
 
+# ---------------------------------------------------------------------------
+# Dynamic config fetch from Spring Boot backend
+# ---------------------------------------------------------------------------
+def _fetch_backend_config(backend_url: str, connection_string: str, retries: int = 3) -> Optional[dict]:
+    """
+    Call GET {backend_url}/api/pi-config/{connection_string} and return
+    the parsed JSON, or None on failure.
+
+    Retries up to `retries` times with 5-second delays.
+    """
+    url = f"{backend_url.rstrip('/')}/api/pi-config/{connection_string}"
+    logger.info("Fetching Pi config from backend: %s", url)
+
+    for attempt in range(1, retries + 1):
+        try:
+            import urllib.request
+            import json as _json
+            with urllib.request.urlopen(url, timeout=10) as resp:
+                if resp.status == 200:
+                    data = _json.loads(resp.read().decode("utf-8"))
+                    logger.info(
+                        "Backend config fetched: connectionString=%s, zones=%d",
+                        data.get("connectionString"),
+                        len(data.get("zones", [])),
+                    )
+                    return data
+                elif resp.status == 404:
+                    logger.warning(
+                        "Backend returned 404 for connectionString=%s — "
+                        "make sure this greenhouse exists in the database.",
+                        connection_string,
+                    )
+                    return None
+        except Exception as exc:
+            logger.warning(
+                "Backend config fetch attempt %d/%d failed: %s",
+                attempt, retries, exc,
+            )
+            if attempt < retries:
+                time.sleep(5)
+
+    logger.error(
+        "Could not fetch Pi config from backend after %d attempt(s). "
+        "Running with local config only.",
+        retries,
+    )
+    return None
+
+
+def _build_sensors_from_backend(backend_data: dict, zone_name: Optional[str] = None) -> list:
+    """
+    Convert the backend pi-config response into a list of sensor defs
+    compatible with SensorRegistry.
+
+    Each zone can have sensors. We publish all of them under their
+    serialNumber (which is the MQTT sensor name).
+
+    The arduino_device and command are set to the serialNumber itself —
+    the actual Arduino command is whatever the Arduino firmware requires
+    (e.g. "SN_xxxx:READ"). If different, override in config.yaml.
+    """
+    sensors = []
+    for zone in backend_data.get("zones", []):
+        if zone_name and zone.get("name", "").lower() != zone_name.lower():
+            continue
+        for s in zone.get("sensors", []):
+            sn = s.get("serialNumber", "").strip()
+            if not sn:
+                continue
+            sensors.append({
+                "name": sn,
+                # The arduino_device maps to the actual arduino component id.
+                # By convention we use the serialNumber as device id; the Arduino
+                # firmware uses the same id to respond. Override in config.yaml if needed.
+                "arduino_device": sn,
+                "field_index": 0,
+                "command": f"{sn}:READ",
+            })
+            logger.debug("Registered sensor from backend: %s", sn)
+    return sensors
+
+
+def _build_operators_from_backend(backend_data: dict, zone_name: Optional[str] = None) -> list:
+    """
+    Convert the backend pi-config response into a list of operator defs
+    compatible with OperatorRegistry.
+    """
+    operators = []
+    for zone in backend_data.get("zones", []):
+        if zone_name and zone.get("name", "").lower() != zone_name.lower():
+            continue
+        for op in zone.get("operators", []):
+            sn = op.get("serialNumber", "").strip()
+            if not sn:
+                continue
+            operators.append({
+                "name": sn,
+                "arduino_device": sn,
+                "actions": {
+                    "on": {
+                        "command": "{device}:ON",
+                        "duration_param": "duration",
+                        "followup": "{device}:OFF",
+                    },
+                    "off": {
+                        "command": "{device}:OFF",
+                    },
+                },
+            })
+            logger.debug("Registered operator from backend: %s", sn)
+    return operators
+
+
+def _build_dynamic_cycle(sensors: list, operators: list, backend_data: dict) -> list:
+    """
+    Build local execution cycles based on the backend ProductionCycle
+    parameters. This guarantees that automation runs locally on the Pi
+    even if the network goes down.
+    """
+    cycles = []
+    
+    # 1. Base cycle: Always read sensors every 60 seconds
+    if sensors:
+        cycles.append({
+            "name": "auto_sensor_publish",
+            "interval": 60,
+            "run_on_start": True,
+            "commands": [{"type": "sensor"}]
+        })
+        
+    # 2. Automation cycles: if there is an active ProductionCycle
+    active_cycle = backend_data.get("activeCycle")
+    if active_cycle and operators:
+        # Build Irrigation Cycle
+        freq_mins = active_cycle.get("irrigationFrequencyMinutes")
+        dur_secs = active_cycle.get("irrigationDurationSeconds")
+        
+        if freq_mins and dur_secs:
+            # Try to find a pump operator
+            pump = next((op for op in operators if "pump" in op["name"].lower() or "eau" in op["name"].lower() or "sn_" in op["name"].lower()), None)
+            if pump:
+                cycles.append({
+                    "name": "auto_irrigation",
+                    "interval": freq_mins * 60,
+                    "run_on_start": True,
+                    "commands": [
+                        {
+                            "type": "serial",
+                            "command": f"{pump['arduino_device']}:ON",
+                            "publish_response": False,
+                            "delay_after": dur_secs
+                        },
+                        {
+                            "type": "serial",
+                            "command": f"{pump['arduino_device']}:OFF",
+                            "publish_response": False
+                        }
+                    ]
+                })
+                logger.info("Generated auto_irrigation cycle: %ds every %dm", dur_secs, freq_mins)
+
+    return cycles
+
+# ---------------------------------------------------------------------------
+# Main loader
+# ---------------------------------------------------------------------------
 def load_config(path: str = "config.yaml") -> dict:
     """
     Load configuration from YAML file merged on top of defaults.
+    Then optionally fetch sensor/operator list from the Spring Boot backend.
+
     Environment variable overrides:
-      ARDUINO_SERIAL_PORT  →  config["serial"]["port"]
-      ARDUINO_MQTT_HOST    →  config["mqtt"]["host"]
-      ARDUINO_MQTT_PORT    →  config["mqtt"]["port"]
-      CONNECTION_STRING    →  part of MQTT prefix
-      ZONE_NAME           →  MQTT prefix as hydroponic/{CONNECTION_STRING}/{ZONE_NAME}
+      ARDUINO_SERIAL_PORT  → config["serial"]["port"]
+      ARDUINO_MQTT_HOST    → config["mqtt"]["host"]
+      ARDUINO_MQTT_PORT    → config["mqtt"]["port"]
+      CONNECTION_STRING    → MQTT prefix: hydroponic/{CONNECTION_STRING}/{ZONE_NAME}
+      ZONE_NAME            → Optional zone segment in topic prefix
+      BACKEND_URL          → If set, fetch dynamic config from backend REST API
+                             e.g. http://192.168.1.10:8082
     """
     config = DEFAULT_CONFIG.copy()
 
@@ -150,8 +319,7 @@ def load_config(path: str = "config.yaml") -> dict:
         except Exception as e:
             logger.warning("Failed to read %s: %s — using defaults", path, e)
 
-    # Load environment variables from an env file if present (useful for systemd
-    # EnvironmentFile-style setups). Check common locations; ignore parse errors.
+    # Load environment variables from /etc/environment if present
     env_file_values = {}
     for env_file in ("/etc/environment",):
         if os.path.isfile(env_file):
@@ -169,7 +337,7 @@ def load_config(path: str = "config.yaml") -> dict:
             except Exception as e:
                 logger.warning("Failed to load env file %s: %s", env_file, e)
 
-    # Environment overrides
+    # Apply simple environment overrides
     env_map = {
         "ARDUINO_SERIAL_PORT":  ("serial", "port"),
         "ARDUINO_SERIAL_BAUD":  ("serial", "baudrate", int),
@@ -186,8 +354,7 @@ def load_config(path: str = "config.yaml") -> dict:
             cast = spec[2] if len(spec) > 2 else str
             config[section][key] = cast(val)
 
-    # If a connection string and zone name are provided as environment variables,
-    # build the MQTT prefix as `hydroponic/{connectionString}/{zoneName}`.
+    # Resolve CONNECTION_STRING + ZONE_NAME → topic_prefix
     conn = (
         env_file_values.get("CONNECTION_STRING")
         or env_file_values.get("ARDUINO_CONNECTION_STRING")
@@ -204,6 +371,81 @@ def load_config(path: str = "config.yaml") -> dict:
         config["mqtt"]["topic_prefix"] = f"hydroponic/{conn}/{zone}"
     elif conn:
         config["mqtt"]["topic_prefix"] = f"hydroponic/{conn}"
+
+    # ── Dynamic config from Spring Boot backend ─────────────────
+    backend_url = (
+        env_file_values.get("BACKEND_URL")
+        or os.environ.get("BACKEND_URL")
+    )
+    if backend_url and conn:
+        backend_data = _fetch_backend_config(backend_url, conn)
+        if backend_data:
+            # If a zone is configured, look up its specific topicPrefix in the zones list
+            authoritative_prefix = None
+            if zone:
+                for z in backend_data.get("zones", []):
+                    if z.get("name", "").lower() == zone.lower():
+                        authoritative_prefix = z.get("topicPrefix")
+                        break
+            if not authoritative_prefix:
+                authoritative_prefix = backend_data.get("topicPrefix")
+
+            if authoritative_prefix:
+                config["mqtt"]["topic_prefix"] = authoritative_prefix
+                logger.info("Topic prefix set from backend: %s", authoritative_prefix)
+
+            # Only populate sensors/operators from backend if not already
+            # configured in config.yaml (config.yaml takes priority)
+            if not config.get("sensors"):
+                backend_sensors = _build_sensors_from_backend(backend_data, zone)
+                if backend_sensors:
+                    config["sensors"] = backend_sensors
+                    logger.info(
+                        "Loaded %d sensor(s) from backend config", len(backend_sensors)
+                    )
+
+            if not config.get("operators"):
+                backend_operators = _build_operators_from_backend(backend_data, zone)
+                if backend_operators:
+                    config["operators"] = backend_operators
+                    logger.info(
+                        "Loaded %d operator(s) from backend config", len(backend_operators)
+                    )
+
+            # Generate and merge dynamic execution cycles from active backend cycle
+            auto_cycles = _build_dynamic_cycle(
+                config.get("sensors", []),
+                config.get("operators", []),
+                backend_data
+            )
+            if auto_cycles:
+                if "cycles" not in config or not config["cycles"]:
+                    config["cycles"] = auto_cycles
+                else:
+                    combined = list(config["cycles"])
+                    for dc in auto_cycles:
+                        if not any(sc.get("name") == dc.get("name") for sc in combined):
+                            if dc.get("name") == "auto_sensor_publish":
+                                has_sensor_cycle = any(
+                                    any(c.get("type") == "sensor" for c in sc.get("commands", []))
+                                    for sc in combined
+                                )
+                                if has_sensor_cycle:
+                                    continue
+                            combined.append(dc)
+                    config["cycles"] = combined
+                logger.info("Merged %d dynamic local cycle(s) from backend config", len(auto_cycles))
+        else:
+            logger.warning(
+                "Backend config unavailable — make sure the greenhouse with "
+                "connectionString=%s exists, and that BACKEND_URL=%s is reachable.",
+                conn, backend_url,
+            )
+    elif conn and not backend_url:
+        logger.info(
+            "BACKEND_URL not set — skipping dynamic config fetch. "
+            "Set BACKEND_URL=http://<server>:8082 on the Pi to enable auto-discovery."
+        )
 
     # Auto-detect the Arduino serial port when not explicitly configured.
     port = config.get("serial", {}).get("port")

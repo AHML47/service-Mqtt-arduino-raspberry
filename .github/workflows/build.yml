@@ -13,7 +13,7 @@ on:
         default: ""
 
 env:
-  PYTHON_VERSION: "3.11"
+  PYTHON_VERSION: "3.13"   # must match the Python on the target Raspberry Pi (Debian Trixie ships 3.13)
   APP_ENTRYPOINT: "service/run_service.py"
   DIST_NAME: "software"
 
@@ -85,7 +85,9 @@ jobs:
       - name: Create ARM64 build container definition
         run: |
           cat > Dockerfile.ota <<'DOCKERFILE'
-          FROM --platform=linux/arm64 python:3.11-slim-bookworm
+          # Match the Pi: Python 3.13 + Debian Trixie userland so the OS-provided
+          # libcamera .so loads cleanly into the frozen binary at runtime.
+          FROM --platform=linux/arm64 python:3.13-slim-trixie
 
           ENV PYTHONDONTWRITEBYTECODE=1 \
               PYTHONUNBUFFERED=1 \
@@ -155,6 +157,8 @@ jobs:
 
               pyinstaller --noconfirm --clean --onefile \
                 --name "${DIST_NAME}" \
+                --exclude-module picamera2 \
+                --exclude-module libcamera \
                 "${APP_ENTRYPOINT}"
 
               chmod +x "dist/${DIST_NAME}"
