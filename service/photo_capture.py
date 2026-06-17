@@ -68,6 +68,11 @@ class PhotoCaptureService:
         except Exception as exc:
             raise PhotoCaptureError(f"picamera2 import failed: {exc}") from exc
 
+        cameras = Picamera2.global_camera_info()
+        if not cameras:
+            logger.warning("No camera detected, camera service disabled")
+            return
+
         self._picam2 = Picamera2()
         config = self._picam2.create_video_configuration(
             main={"size": self._resolution, "format": "RGB888"},

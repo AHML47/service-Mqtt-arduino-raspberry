@@ -87,6 +87,14 @@ class CycleManager:
             t.join(timeout=5)
         logger.info("CycleManager stopped")
 
+    def reload_cycles(self, new_cycles_config: list):
+        logger.info("CycleManager: reloading with %d cycle(s)...", len(new_cycles_config))
+        self.stop()
+        self._cycles = new_cycles_config
+        self._stop_events = []
+        self._threads = []
+        self.start()
+
     # ── Internal: cycle loop ─────────────────────────────────
 
     def _cycle_loop(self, group: dict, stop_event: threading.Event):
@@ -188,9 +196,12 @@ class CycleManager:
             sensors = self._sensor_registry.all()
 
         for sensor in sensors:
-            value = self._sensor_registry.read_sensor(sensor.name, self._serial)
-            if value is not None:
-                self._mqtt.publish_sensor_data(sensor.name, value)
+            try:
+                value = self._sensor_registry.read_sensor(sensor.name, self._serial)
+                if value is not None:
+                    self._mqtt.publish_sensor_data(sensor.name, value)
+            except Exception as exc:
+                logger.error("Cycle: failed to read/publish sensor '%s': %s", sensor.name, exc)
 
     # ── Serial response → MQTT sensorData ────────────────────
 

@@ -6,7 +6,7 @@ Pipeline:
       -> 1280-dimensional feature vector
       -> meta-learner router
       -> one selected expert: ConvNeXt, ResNet50, or InceptionV3
-      -> final disease class and confidence
+      -> final disease class, confidence, and all class probabilities
 """
 
 from __future__ import annotations
@@ -45,6 +45,31 @@ def _stable_softmax(logits: np.ndarray) -> np.ndarray:
     shifted = logits - np.max(logits, axis=-1, keepdims=True)
     exponentials = np.exp(shifted)
     return exponentials / np.sum(exponentials, axis=-1, keepdims=True)
+
+
+
+def _format_class_probabilities(
+    class_names: list[str],
+    probabilities: np.ndarray,
+) -> list[dict[str, Any]]:
+    """Return JSON-friendly probabilities for every class in class-index order."""
+    probabilities = np.asarray(probabilities, dtype=np.float32).reshape(-1)
+
+    if len(probabilities) != len(class_names):
+        raise ValueError(
+            "Expert output size and classes.json disagree: "
+            f"{len(probabilities)} probabilities versus {len(class_names)} classes"
+        )
+
+    return [
+        {
+            "class_index": int(index),
+            "class_name": str(class_name),
+            "probability": float(probability),
+            "percentage": float(probability * 100.0),
+        }
+        for index, (class_name, probability) in enumerate(zip(class_names, probabilities))
+    ]
 
 
 def _resize_shorter_side(image: Image.Image, shorter_side: int) -> Image.Image:
@@ -232,13 +257,32 @@ class PlantDiseaseDES:
 
         class_index = int(np.argmax(class_probabilities))
         probability = float(class_probabilities[class_index])
+        all_class_probabilities = _format_class_probabilities(
+            self.class_names,
+            class_probabilities,
+        )
+        ranked_class_probabilities = sorted(
+            all_class_probabilities,
+            key=lambda item: item["probability"],
+            reverse=True,
+        )
         timings["total_seconds"] = sum(timings.values())
 
         return {
+            # Backward-compatible top prediction fields.
             "class_index": class_index,
             "class_name": self.class_names[class_index],
             "probability": probability,
+            "percentage": probability * 100.0,
             "description": f"{self.class_names[class_index]}: {probability * 100.0:.3f}%",
+
+            # Full distribution returned by the selected expert.
+            # class_probabilities keeps the same order as classes.json.
+            "class_probabilities": all_class_probabilities,
+
+            # ranked_class_probabilities is useful for dashboards / top-k displays.
+            "ranked_class_probabilities": ranked_class_probabilities,
+
             "selected_expert_index": selected_expert_index,
             "selected_expert_name": expert_spec["name"],
             "feature_vector_shape": list(features.shape),

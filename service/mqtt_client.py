@@ -119,29 +119,43 @@ class MQTTClient:
         self._client.publish(topic, image_bytes, qos=self._qos)
         logger.debug("PUB %s → <binary %d bytes>", topic, len(image_bytes))
 
-    def publish_ai_alert(self, image_bytes: bytes, description: str):
+    def publish_ai_alert(self, image_bytes: bytes, pathology: str, confidence: float):
         """Publish an AI detection alert to {prefix}/ai/alert.
 
         JSON cannot contain raw bytes, so the JPEG is encoded as a Base64 string.
-        The payload intentionally uses the key `descreption` to match the
-        requested backend contract.
         """
         topic = f"{self._prefix}/ai/alert"
         payload = json.dumps(
             {
-                "image": base64.b64encode(image_bytes).decode("ascii"),
-                "descreption": description,
+                "thumbnailBase64": base64.b64encode(image_bytes).decode("ascii"),
+                "pathologyType": pathology,
+                "confidenceScore": float(confidence),
             },
             separators=(",", ":"),
         )
         self._client.publish(topic, payload, qos=self._qos)
         logger.info(
-            "PUB %s → AI alert (%d JPEG bytes, %d JSON bytes): %s",
+            "PUB %s → AI alert (%d JPEG bytes, %d JSON bytes): %s - %.1f%%",
             topic,
             len(image_bytes),
             len(payload),
-            description,
+            pathology,
+            confidence,
         )
+
+    def publish_ai_error(self, error_message: str):
+        """Publish an AI failure alert to {prefix}/ai/error."""
+        topic = f"{self._prefix}/ai/error"
+        payload = json.dumps({"errorMessage": error_message, "time": datetime.now(timezone.utc).isoformat()})
+        self._client.publish(topic, payload, qos=self._qos)
+        logger.info("PUB %s → %s", topic, payload)
+
+    def publish_system_status(self, status: str = "online"):
+        """Publish system heartbeat to {prefix}/system/status."""
+        topic = f"{self._prefix}/system/status"
+        payload = json.dumps({"status": status, "time": datetime.now(timezone.utc).isoformat()})
+        self._client.publish(topic, payload, qos=self._qos)
+        logger.debug("PUB %s → %s", topic, payload)
 
     def publish_raw(self, topic: str, payload: str):
         """Publish a raw string payload to an explicit topic (absolute path)."""
@@ -161,7 +175,13 @@ class MQTTClient:
 
         # Subscribe to every suffix the router knows about
         for suffix in self._router.registered_suffixes():
-            topic = f"{self._prefix}/{suffix}"
+            if suffix == "config/cycle":
+                # Greenhouse-wide subscription (one level up from zone prefix)
+                parts = self._prefix.split('/')
+                conn = parts[1] if len(parts) >= 2 else "default"
+                topic = f"hydroponic/{conn}/config/cycle"
+            else:
+                topic = f"{self._prefix}/{suffix}"
             client.subscribe(topic, qos=self._qos)
             logger.info("Subscribed: %s", topic)
 
@@ -170,11 +190,18 @@ class MQTTClient:
         raw = msg.payload.decode("utf-8", errors="replace").strip()
         logger.debug("MSG %s → %s", topic, raw[:120])
 
-        prefix_with_slash = self._prefix + "/"
-        if not topic.startswith(prefix_with_slash):
-            return
+        parts = self._prefix.split('/')
+        conn = parts[1] if len(parts) >= 2 else "default"
+        cycle_topic = f"hydroponic/{conn}/config/cycle"
 
-        suffix = topic[len(prefix_with_slash):]
+        if topic == cycle_topic:
+            suffix = "config/cycle"
+        else:
+            prefix_with_slash = self._prefix + "/"
+            if not topic.startswith(prefix_with_slash):
+                return
+            suffix = topic[len(prefix_with_slash):]
+
         payload = _parse_payload(raw)
         self._router.route(suffix, payload)
 

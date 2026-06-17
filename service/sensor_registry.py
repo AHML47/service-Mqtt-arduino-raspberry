@@ -82,6 +82,9 @@ class SensorRegistry:
         sensors = self.by_device(device)
         if not sensors:
             # Unmapped device — publish under the device name itself
+            if not parts or not parts[0]:
+                logger.debug("Empty payload for unmapped device '%s'", device)
+                return []
             try:
                 value: object = float(parts[0])
             except (ValueError, IndexError):
@@ -90,9 +93,16 @@ class SensorRegistry:
 
         results = []
         for sensor in sensors:
+            if sensor.field_index >= len(parts):
+                logger.warning(
+                    "Field index %d out of range for sensor '%s' "
+                    "(payload has %d part(s): '%s')",
+                    sensor.field_index, sensor.name, len(parts), payload,
+                )
+                continue
             try:
                 results.append((sensor.name, float(parts[sensor.field_index])))
-            except (ValueError, IndexError):
+            except ValueError:
                 logger.warning(
                     "Cannot parse field %d for sensor '%s' from payload '%s'",
                     sensor.field_index, sensor.name, payload,
@@ -114,8 +124,14 @@ class SensorRegistry:
             return None
 
         parts = response[3:].split(":")
+        if sensor.field_index >= len(parts):
+            logger.warning(
+                "Sensor '%s' field_index %d out of range (response has %d part(s): '%s')",
+                name, sensor.field_index, len(parts), response,
+            )
+            return None
         try:
             return float(parts[sensor.field_index])
-        except (ValueError, IndexError):
+        except ValueError:
             logger.warning("Cannot parse value for sensor '%s': %s", name, response)
             return None

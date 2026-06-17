@@ -120,7 +120,7 @@ class SerialConnection:
             try:
                 self._ser.write(line.encode("utf-8"))
                 self._ser.flush()
-                logger.debug("TX → %s", command.strip())
+                logger.info("Arduino TX → %s", command.strip())
             except serial.SerialException as e:
                 logger.error("Serial write failed: %s", e)
                 self._schedule_reconnect()
