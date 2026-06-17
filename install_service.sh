@@ -7,7 +7,7 @@ SERVICE_FILE="${SERVICE_FILE:-${SYSTEMD_DIR}/${SERVICE_NAME}.service}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="${PROJECT_DIR:-${SCRIPT_DIR}}"
 RUN_USER="${RUN_USER:-ahml47}"
-APP_BIN="${APP_BIN:-${PROJECT_DIR}/ota-service}"
+APP_BIN="${APP_BIN:-${PROJECT_DIR}/software}"
 CONFIG_FILE="${CONFIG_FILE:-${PROJECT_DIR}/service/config.yaml}"
 
 if [[ "${EUID}" -ne 0 ]]; then
