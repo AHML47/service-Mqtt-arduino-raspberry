@@ -1,10 +1,6 @@
 name: Build, Test, and Deploy Raspberry Pi OTA Package
 
 on:
-  push:
-    branches:
-      - main
-  pull_request:
   workflow_dispatch:
     inputs:
       release_name:
